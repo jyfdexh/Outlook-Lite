@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Outlook 邮件工作台</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="mail-app">
+      <aside class="account-pane">
+        <header class="pane-head">
+          <div>
+            <div class="eyebrow">Outlook</div>
+            <h1>邮箱列表</h1>
+          </div>
+          <button id="add-account-button" class="add-account-trigger" type="button" title="添加邮箱">
+            <span>+</span>
+            <strong>添加邮箱</strong>
+          </button>
+        </header>
+
+        <div class="search-box">
+          <input id="account-search" type="search" placeholder="搜索邮箱" autocomplete="off" />
+        </div>
+
+        <div class="storage-tools">
+          <button id="clear-storage-button" class="storage-clear" type="button">清空本地邮箱</button>
+        </div>
+
+        <section class="account-tools">
+          <div class="tool-row">
+            <span>排序</span>
+            <button class="chip active" type="button">邮箱名</button>
+          </div>
+          <div class="tool-row">
+            <span>每页</span>
+            <select id="top-select">
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+        </section>
+
+        <section id="account-list" class="account-list" aria-label="邮箱列表"></section>
+      </aside>
+
+      <section class="message-pane">
+        <header class="message-head">
+          <div>
+            <h2>邮件</h2>
+            <p id="mail-summary">添加邮箱后读取邮件</p>
+          </div>
+          <button id="fetch-button" type="button">获取邮件</button>
+        </header>
+
+        <nav class="folder-tabs" aria-label="邮件筛选">
+          <button class="folder-tab active" type="button" data-filter="all">全部邮件</button>
+          <button class="folder-tab" type="button" data-filter="unread">未读</button>
+          <button class="folder-tab" type="button" data-filter="attachments">有附件</button>
+        </nav>
+
+        <div id="status" class="status" aria-live="polite"></div>
+        <section id="message-list" class="message-list" aria-label="邮件列表"></section>
+      </section>
+
+      <section class="detail-pane">
+        <header class="detail-toolbar">
+          <button id="toggle-source-button" class="toolbar-button" type="button">显示邮件源</button>
+          <label class="trust-check">
+            <input id="trust-mail-checkbox" type="checkbox" />
+            信任此邮件
+          </label>
+        </header>
+
+        <article id="message-detail" class="message-detail empty">
+          <div class="empty-state">
+            <h2>选择一封邮件</h2>
+            <p>邮件正文会显示在这里。</p>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <div id="account-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal></div>
+      <form id="account-form" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <header class="modal-head">
+          <div>
+            <div class="eyebrow">Outlook</div>
+            <h2 id="modal-title">添加邮箱</h2>
+          </div>
+          <button class="modal-close" type="button" data-close-modal>×</button>
+        </header>
+        <label for="account-input">每行一个邮箱</label>
+        <textarea
+          id="account-input"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="邮箱----密码----client_id----refresh_token&#10;邮箱----密码----refresh_token----client_id"
+        ></textarea>
+        <footer class="modal-actions">
+          <button id="clear-accounts-button" class="ghost" type="button">清空</button>
+          <button id="save-accounts-button" type="submit">添加邮箱</button>
+        </footer>
+      </form>
+    </div>
+
+    <div id="confirm-modal" class="modal confirm-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-confirm></div>
+      <section class="confirm-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <header>
+          <div class="eyebrow">确认操作</div>
+          <h2 id="confirm-title">清空本地邮箱？</h2>
+        </header>
+        <p>这会删除本机浏览器保存的邮箱、邮件缓存和当前选择状态。此操作不会影响 Outlook 邮箱本身。</p>
+        <footer>
+          <button id="cancel-clear-button" class="ghost" type="button" data-close-confirm>取消</button>
+          <button id="confirm-clear-button" class="danger" type="button">确认清空</button>
+        </footer>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
