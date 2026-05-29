@@ -102,18 +102,17 @@
           <button class="modal-close" type="button" data-close-modal>×</button>
         </header>
         <div class="account-format-note">
-          <label for="account-input">每行一个邮箱</label>
+          <label for="account-input">tip:</label>
           <p>
-            支持两种格式，系统会自动识别 <code>client_id</code> 和 <code>refresh_token</code> 的位置。读取邮件实际使用的是
-            <code>client_id + refresh_token</code> 换取访问令牌；中间的“密码”字段只是兼容原始账号格式的占位，不参与登录校验，
-            不需要真实密码，可以任意填写。每行只保留 4 段，用 <strong>----</strong> 分隔。
+            读取邮件实际使用的是 <code>client_id + refresh_token</code> 换取访问令牌；<br />
+            密码字段只是兼容原始账号格式的占位，不参与登录校验，可以任意填写。
           </p>
         </div>
         <textarea
           id="account-input"
           spellcheck="false"
           autocomplete="off"
-          placeholder="邮箱----密码----client_id----refresh_token&#10;邮箱----密码----refresh_token----client_id"
+          placeholder="每行一个邮箱令牌，支持下列2种格式&#10;邮箱----密码----client_id----refresh_token&#10;邮箱----密码----refresh_token----client_id"
         ></textarea>
         <footer class="modal-actions">
           <button id="clear-accounts-button" class="ghost" type="button">清空</button>
