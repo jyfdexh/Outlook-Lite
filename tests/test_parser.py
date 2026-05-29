@@ -3,11 +3,16 @@ from email.message import EmailMessage
 
 from app import (
     AccountParseError,
+    folders_for_scope,
     html_to_text,
     is_probable_client_id,
+    is_graph_next_link,
     normalize_graph_message,
+    normalize_mail_scope,
+    normalize_skip,
     normalize_imap_message,
     normalize_top,
+    parse_graph_next_links,
     parse_outlook_account_line,
 )
 
@@ -56,6 +61,33 @@ class OutlookAccountParserTests(unittest.TestCase):
         self.assertEqual(normalize_top("0"), 1)
         self.assertEqual(normalize_top("1000"), 50)
         self.assertEqual(normalize_top("abc"), 10)
+
+    def test_skip_is_clamped(self):
+        self.assertEqual(normalize_skip("-1"), 0)
+        self.assertEqual(normalize_skip("10001"), 10000)
+        self.assertEqual(normalize_skip("abc"), 0)
+
+    def test_mail_scope_is_normalized(self):
+        self.assertEqual(normalize_mail_scope("junk"), "junk")
+        self.assertEqual(normalize_mail_scope("nonjunk"), "nonjunk")
+        self.assertEqual(normalize_mail_scope("bad"), "nonjunk")
+        self.assertEqual(folders_for_scope("all"), ("inbox", "junk"))
+
+    def test_graph_next_link_accepts_inbox_folder_shape(self):
+        self.assertTrue(
+            is_graph_next_link(
+                "https://graph.microsoft.com/v1.0/me/mailFolders('inbox')/messages?%24top=10&%24skip=10"
+            )
+        )
+        self.assertFalse(is_graph_next_link("https://example.com/v1.0/me/mailFolders('inbox')/messages"))
+
+    def test_graph_next_links_parse_json_map(self):
+        parsed = parse_graph_next_links(
+            '{"inbox":"https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages","junk":"https://graph.microsoft.com/v1.0/me/mailFolders/junkemail/messages"}'
+        )
+
+        self.assertIn("inbox", parsed)
+        self.assertIn("junk", parsed)
 
     def test_graph_message_includes_recipients_and_body_text(self):
         parsed = normalize_graph_message(

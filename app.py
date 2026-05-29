@@ -26,6 +26,15 @@ STATIC_DIR = ROOT / "static"
 ACCOUNT_SEPARATOR = "----"
 DEFAULT_TOP = 10
 MAX_TOP = 50
+MAX_SKIP = 10000
+GRAPH_FOLDER_IDS = {
+    "inbox": "inbox",
+    "junk": "junkemail",
+}
+IMAP_FOLDER_NAMES = {
+    "inbox": ("INBOX",),
+    "junk": ("Junk Email", "Junk", "Spam"),
+}
 
 GRAPH_TOKEN_ATTEMPTS = (
     ("common", "https://graph.microsoft.com/.default"),
@@ -107,6 +116,38 @@ def normalize_top(value: Any) -> int:
     return max(1, min(top, MAX_TOP))
 
 
+def normalize_skip(value: Any) -> int:
+    try:
+        skip = int(value)
+    except (TypeError, ValueError):
+        skip = 0
+    return max(0, min(skip, MAX_SKIP))
+
+
+def normalize_mail_scope(value: Any) -> str:
+    candidate = str(value or "nonjunk").strip().lower()
+    return candidate if candidate in {"all", "nonjunk", "junk"} else "nonjunk"
+
+
+def folders_for_scope(scope: str) -> tuple[str, ...]:
+    if scope == "junk":
+        return ("junk",)
+    if scope == "nonjunk":
+        return ("inbox",)
+    return ("inbox", "junk")
+
+
+def is_graph_next_link(value: str) -> bool:
+    parsed = parse.urlparse(str(value or ""))
+    normalized_path = parse.unquote(parsed.path).lower()
+    return (
+        parsed.scheme == "https"
+        and parsed.netloc.lower() == "graph.microsoft.com"
+        and normalized_path.startswith("/v1.0/me/mailfolders")
+        and "/messages" in normalized_path
+    )
+
+
 def post_form_json(url: str, form_data: dict[str, str], timeout: int = 30) -> dict[str, Any]:
     payload = parse.urlencode(form_data).encode("utf-8")
     req = request.Request(
@@ -127,6 +168,19 @@ def get_json(url: str, headers: dict[str, str], params: dict[str, Any], timeout:
     separator = "&" if "?" in url else "?"
     req = request.Request(
         f"{url}{separator}{query}",
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "outlook-mail-lite/1.0",
+            **headers,
+        },
+    )
+    return open_json(req, timeout=timeout)
+
+
+def get_json_url(url: str, headers: dict[str, str], timeout: int = 30) -> dict[str, Any]:
+    req = request.Request(
+        url,
         method="GET",
         headers={
             "Accept": "application/json",
@@ -194,40 +248,135 @@ def get_access_token(client_id: str, refresh_token: str, attempts: tuple[tuple[s
     raise OutlookReadError("刷新 access_token 失败", details="\n".join(errors))
 
 
-def read_messages(account_line: str, top: int = DEFAULT_TOP) -> dict[str, Any]:
+def read_messages(
+    account_line: str,
+    top: int = DEFAULT_TOP,
+    skip: int = 0,
+    next_link: str = "",
+    mail_scope: str = "nonjunk",
+) -> dict[str, Any]:
     account = parse_outlook_account_line(account_line)
     top = normalize_top(top)
+    skip = normalize_skip(skip)
+    next_link = str(next_link or "").strip()
+    mail_scope = normalize_mail_scope(mail_scope)
 
     graph_error = ""
     try:
-        messages = read_messages_graph(account["client_id"], account["refresh_token"], top)
-        return {"source": "Microsoft Graph", "account": account, "messages": messages}
+        messages, graph_next_link = read_messages_graph(
+            account["client_id"],
+            account["refresh_token"],
+            top,
+            skip=skip,
+            next_link=next_link,
+            mail_scope=mail_scope,
+        )
+        return {
+            "source": "Microsoft Graph",
+            "account": account,
+            "messages": messages,
+            "next_link": graph_next_link,
+            "has_more": bool(graph_next_link),
+        }
     except OutlookReadError as exc:
         graph_error = f"{exc}; {exc.details}".strip()
 
     try:
-        messages = read_messages_imap(account["email"], account["client_id"], account["refresh_token"], top)
-        return {"source": "IMAP XOAUTH2", "account": account, "messages": messages}
+        messages, has_more = read_messages_imap(
+            account["email"],
+            account["client_id"],
+            account["refresh_token"],
+            top,
+            skip,
+            mail_scope=mail_scope,
+        )
+        return {
+            "source": "IMAP XOAUTH2",
+            "account": account,
+            "messages": messages,
+            "next_link": "",
+            "has_more": has_more,
+        }
     except OutlookReadError as exc:
         details = "\n".join(part for part in (f"Graph: {graph_error}", f"IMAP: {exc.details}") if part)
         raise OutlookReadError("读取邮件失败", details=details) from exc
 
 
-def read_messages_graph(client_id: str, refresh_token: str, top: int) -> list[dict[str, Any]]:
+def read_messages_graph(
+    client_id: str,
+    refresh_token: str,
+    top: int,
+    *,
+    skip: int = 0,
+    next_link: str = "",
+    mail_scope: str = "all",
+) -> tuple[list[dict[str, Any]], str]:
     access_token = get_access_token(client_id, refresh_token, GRAPH_TOKEN_ATTEMPTS)
-    data = get_json(
-        "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Prefer": "outlook.body-content-type='html'",
-        },
-        params={
-            "$top": top,
-            "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview,body",
-            "$orderby": "receivedDateTime desc",
-        },
-    )
-    return [normalize_graph_message(item) for item in data.get("value", [])]
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Prefer": "outlook.body-content-type='html'",
+    }
+    if next_link:
+        return read_graph_next_links(next_link, headers, top)
+    else:
+        messages: list[dict[str, Any]] = []
+        next_links: dict[str, str] = {}
+        for folder in folders_for_scope(normalize_mail_scope(mail_scope)):
+            folder_id = GRAPH_FOLDER_IDS[folder]
+            params: dict[str, Any] = {
+                "$top": top,
+                "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview,body",
+                "$orderby": "receivedDateTime desc",
+            }
+            if skip:
+                params["$skip"] = skip
+            url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder_id}/messages"
+            data = get_json(url, headers=headers, params=params)
+            folder_messages = [normalize_graph_message(item) for item in data.get("value", [])]
+            for message in folder_messages:
+                message["folder"] = folder
+            messages.extend(folder_messages)
+            if data.get("@odata.nextLink"):
+                next_links[folder] = str(data["@odata.nextLink"])
+
+        messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
+        return messages[:top], json.dumps(next_links, ensure_ascii=False) if next_links else ""
+
+
+def read_graph_next_links(next_link: str, headers: dict[str, str], top: int) -> tuple[list[dict[str, Any]], str]:
+    parsed_links = parse_graph_next_links(next_link)
+    messages: list[dict[str, Any]] = []
+    next_links: dict[str, str] = {}
+    for folder, url in parsed_links.items():
+        if not is_graph_next_link(url):
+            raise OutlookReadError("Graph 下一页链接无效")
+        data = get_json_url(url, headers=headers)
+        folder_messages = [normalize_graph_message(item) for item in data.get("value", [])]
+        for message in folder_messages:
+            message["folder"] = folder
+        messages.extend(folder_messages)
+        if data.get("@odata.nextLink"):
+            next_links[folder] = str(data["@odata.nextLink"])
+    messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
+    return messages[:top], json.dumps(next_links, ensure_ascii=False) if next_links else ""
+
+
+def parse_graph_next_links(value: str) -> dict[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"junk" if "junkemail" in raw.lower() else "inbox": raw}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, str] = {}
+    for folder, url in data.items():
+        folder_key = "junk" if str(folder).lower() == "junk" else "inbox"
+        if url:
+            result[folder_key] = str(url)
+    return result
 
 
 def normalize_graph_message(item: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +410,14 @@ def normalize_graph_message(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def read_messages_imap(email_addr: str, client_id: str, refresh_token: str, top: int) -> list[dict[str, Any]]:
+def read_messages_imap(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    top: int,
+    skip: int = 0,
+    mail_scope: str = "all",
+) -> tuple[list[dict[str, Any]], bool]:
     access_token = get_access_token(client_id, refresh_token, IMAP_TOKEN_ATTEMPTS)
     errors: list[str] = []
 
@@ -271,25 +427,14 @@ def read_messages_imap(email_addr: str, client_id: str, refresh_token: str, top:
             connection = imaplib.IMAP4_SSL(server, 993, timeout=30)
             auth_string = f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
             connection.authenticate("XOAUTH2", lambda _: auth_string)
-            status, mailbox_data = connection.select("INBOX", readonly=True)
-            if status != "OK" or not mailbox_data or not mailbox_data[0]:
-                raise OutlookReadError("无法打开 INBOX")
-
-            total_messages = int(mailbox_data[0])
-            if total_messages <= 0:
-                return []
-
-            start = max(1, total_messages - top + 1)
             messages: list[dict[str, Any]] = []
-            for sequence_number in range(total_messages, start - 1, -1):
-                message_id = str(sequence_number)
-                status, fetched = connection.fetch(message_id, "(RFC822)")
-                if status != "OK" or not fetched or not fetched[0]:
-                    continue
-                raw = fetched[0][1]
-                if isinstance(raw, bytes):
-                    messages.append(normalize_imap_message(raw, message_id))
-            return messages
+            has_more = False
+            for folder in folders_for_scope(normalize_mail_scope(mail_scope)):
+                folder_messages, folder_has_more = read_imap_folder(connection, folder, top, skip)
+                messages.extend(folder_messages)
+                has_more = has_more or folder_has_more
+            messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
+            return messages[:top], has_more
         except Exception as exc:
             errors.append(f"{server}: {exc}")
         finally:
@@ -300,6 +445,46 @@ def read_messages_imap(email_addr: str, client_id: str, refresh_token: str, top:
                     pass
 
     raise OutlookReadError("IMAP 读取失败", details="\n".join(errors))
+
+
+def read_imap_folder(
+    connection: imaplib.IMAP4_SSL,
+    folder: str,
+    top: int,
+    skip: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    mailbox_data: list[bytes] | None = None
+    selected_mailbox = ""
+    for mailbox in IMAP_FOLDER_NAMES[folder]:
+        status, candidate_data = connection.select(mailbox, readonly=True)
+        if status == "OK" and candidate_data and candidate_data[0]:
+            mailbox_data = candidate_data
+            selected_mailbox = mailbox
+            break
+    if not mailbox_data:
+        return [], False
+
+    total_messages = int(mailbox_data[0])
+    if total_messages <= 0:
+        return [], False
+    end = total_messages - skip
+    if end <= 0:
+        return [], False
+
+    start = max(1, end - top + 1)
+    messages: list[dict[str, Any]] = []
+    for sequence_number in range(end, start - 1, -1):
+        message_id = f"{folder}:{sequence_number}"
+        status, fetched = connection.fetch(str(sequence_number), "(RFC822)")
+        if status != "OK" or not fetched or not fetched[0]:
+            continue
+        raw = fetched[0][1]
+        if isinstance(raw, bytes):
+            message = normalize_imap_message(raw, message_id)
+            message["folder"] = folder
+            message["folder_name"] = selected_mailbox
+            messages.append(message)
+    return messages, start > 1
 
 
 def normalize_imap_message(raw: bytes, message_id: str) -> dict[str, Any]:
@@ -438,7 +623,13 @@ class AppHandler(SimpleHTTPRequestHandler):
     def handle_messages(self) -> None:
         try:
             payload = self.read_json_body()
-            result = read_messages(payload.get("account", ""), payload.get("top", DEFAULT_TOP))
+            result = read_messages(
+                payload.get("account", ""),
+                payload.get("top", DEFAULT_TOP),
+                payload.get("skip", 0),
+                payload.get("next_link", ""),
+                payload.get("scope", "nonjunk"),
+            )
             account = result["account"]
             self.send_json(
                 {
@@ -448,6 +639,8 @@ class AppHandler(SimpleHTTPRequestHandler):
                         "client_id": account["client_id"],
                     },
                     "messages": result["messages"],
+                    "next_link": result.get("next_link", ""),
+                    "has_more": bool(result.get("has_more")),
                 }
             )
         except AccountParseError as exc:

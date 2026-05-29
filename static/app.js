@@ -4,8 +4,10 @@ const state = {
   selectedAccountId: null,
   selectedMessageKey: null,
   filter: "all",
+  mailScope: "nonjunk",
   showSource: false,
   visibleByAccount: {},
+  accountSort: "createdDesc",
 };
 
 const STORAGE_KEY = "outlook-mail-lite-state-v1";
@@ -21,6 +23,7 @@ const clearAccountsButton = document.querySelector("#clear-accounts-button");
 const clearStorageButton = document.querySelector("#clear-storage-button");
 const confirmClearButton = document.querySelector("#confirm-clear-button");
 const fetchButton = document.querySelector("#fetch-button");
+const sortSelect = document.querySelector("#sort-select");
 const topSelect = document.querySelector("#top-select");
 const mailSummary = document.querySelector("#mail-summary");
 const statusBox = document.querySelector("#status");
@@ -30,7 +33,14 @@ const folderTabs = document.querySelectorAll(".folder-tab");
 const toggleSourceButton = document.querySelector("#toggle-source-button");
 const trustMailCheckbox = document.querySelector("#trust-mail-checkbox");
 const toast = document.querySelector("#toast");
+const customSelects = document.querySelectorAll("[data-custom-select]");
 const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
+const ACCOUNT_SORT_VALUES = new Set(["emailAsc", "emailDesc", "createdDesc", "createdAsc"]);
+const MAIL_SCOPE_LABELS = {
+  all: "全部邮件",
+  nonjunk: "非垃圾邮件",
+  junk: "仅垃圾邮件",
+};
 
 function loadSavedState() {
   try {
@@ -40,18 +50,26 @@ function loadSavedState() {
     state.selectedAccountId = saved.selectedAccountId || state.accounts[0]?.id || null;
     state.selectedMessageKey = saved.selectedMessageKey || null;
     state.filter = saved.filter || "all";
+    state.mailScope = normalizeMailScope(saved.mailScope);
+    state.accountSort = normalizeAccountSort(saved.accountSort);
     state.visibleByAccount = saved.visibleByAccount && typeof saved.visibleByAccount === "object" ? saved.visibleByAccount : {};
     state.accounts.forEach((account) => {
       account.status = account.status || "idle";
       account.source = account.source || "";
       account.error = account.error || "";
       account.count = Number(account.count || 0);
+      account.hasMore = Boolean(account.hasMore);
+      account.nextLink = account.nextLink || "";
+      account.nextLinkTop = Number(account.nextLinkTop || 0);
       account.lastReadAt = account.lastReadAt || "";
       account.createdAt = account.createdAt || account.lastReadAt || "";
     });
     state.messages.forEach((message) => {
       message.verificationCode = message.verificationCode || extractVerificationCode(message);
     });
+    sortSelect.value = state.accountSort;
+    syncCustomSelect(sortSelect);
+    syncCustomSelect(topSelect);
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -64,6 +82,8 @@ function saveState() {
     selectedAccountId: state.selectedAccountId,
     selectedMessageKey: state.selectedMessageKey,
     filter: state.filter,
+    mailScope: state.mailScope,
+    accountSort: state.accountSort,
     visibleByAccount: state.visibleByAccount,
     savedAt: new Date().toISOString(),
   };
@@ -77,7 +97,11 @@ function clearSavedState() {
   state.selectedAccountId = null;
   state.selectedMessageKey = null;
   state.filter = "all";
+  state.mailScope = "nonjunk";
+  state.accountSort = "createdDesc";
   state.visibleByAccount = {};
+  sortSelect.value = state.accountSort;
+  syncCustomSelect(sortSelect);
   folderTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.filter === "all"));
   setStatus("本地邮箱数据已清空");
   showToast("已清空本地邮箱");
@@ -89,6 +113,23 @@ function createId(prefix = "id") {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeAccountSort(value) {
+  if (value === "email") {
+    return "emailAsc";
+  }
+  if (value === "createdAt") {
+    return "createdDesc";
+  }
+  if (value === "countDesc" || value === "countAsc") {
+    return "createdDesc";
+  }
+  return ACCOUNT_SORT_VALUES.has(value) ? value : "createdDesc";
+}
+
+function normalizeMailScope(value) {
+  return Object.prototype.hasOwnProperty.call(MAIL_SCOPE_LABELS, value) ? value : "nonjunk";
 }
 
 function escapeHtml(value) {
@@ -119,15 +160,95 @@ function getEmailFromLine(line) {
 }
 
 function setStatus(message, type = "") {
-  statusBox.textContent = message || "";
+  if (type === "loading" && message) {
+    statusBox.innerHTML = `<span class="status-spinner" aria-hidden="true"></span><span>${escapeHtml(message)}</span>`;
+  } else {
+    statusBox.textContent = message || "";
+  }
   statusBox.className = `status ${message ? "visible" : ""} ${type}`.trim();
 }
 
 function showToast(message) {
   toast.textContent = message;
+  toast.classList.remove("visible");
+  void toast.offsetWidth;
   toast.classList.add("visible");
   window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => toast.classList.remove("visible"), 1600);
+  showToast.timer = window.setTimeout(() => toast.classList.remove("visible"), 1500);
+}
+
+function buildCustomSelect(select) {
+  const wrap = select.closest("[data-select-wrap]");
+  if (!wrap || wrap.querySelector(".select-trigger")) {
+    return;
+  }
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+
+  const label = document.createElement("span");
+  label.className = "select-value";
+  const arrow = document.createElement("span");
+  arrow.className = "select-arrow";
+  arrow.setAttribute("aria-hidden", "true");
+  arrow.textContent = "⌄";
+  trigger.append(label, arrow);
+
+  const menu = document.createElement("div");
+  menu.className = "select-menu";
+  menu.setAttribute("role", "listbox");
+  [...select.options].forEach((option) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "select-option";
+    item.dataset.value = option.value;
+    item.setAttribute("role", "option");
+    item.textContent = option.textContent;
+    item.addEventListener("click", () => {
+      select.value = option.value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      closeCustomSelects();
+    });
+    menu.append(item);
+  });
+
+  trigger.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const willOpen = !wrap.classList.contains("open");
+    closeCustomSelects();
+    wrap.classList.toggle("open", willOpen);
+    trigger.setAttribute("aria-expanded", String(willOpen));
+  });
+
+  wrap.append(trigger, menu);
+  syncCustomSelect(select);
+}
+
+function syncCustomSelect(select) {
+  const wrap = select.closest("[data-select-wrap]");
+  if (!wrap) {
+    return;
+  }
+  const selectedOption = select.selectedOptions[0];
+  const label = wrap.querySelector(".select-value");
+  if (label) {
+    label.textContent = selectedOption?.textContent || "";
+  }
+  wrap.querySelectorAll(".select-option").forEach((option) => {
+    const selected = option.dataset.value === select.value;
+    option.classList.toggle("selected", selected);
+    option.setAttribute("aria-selected", String(selected));
+  });
+}
+
+function closeCustomSelects() {
+  document.querySelectorAll("[data-select-wrap].open").forEach((wrap) => {
+    wrap.classList.remove("open");
+    wrap.querySelector(".select-trigger")?.setAttribute("aria-expanded", "false");
+  });
 }
 
 function openAccountModal() {
@@ -187,6 +308,9 @@ async function addAccountsFromInput() {
       source: "",
       error: "",
       count: 0,
+      hasMore: false,
+      nextLink: "",
+      nextLinkTop: 0,
       lastReadAt: "",
       createdAt: new Date().toISOString(),
     };
@@ -220,12 +344,25 @@ async function addAccountsFromInput() {
   render();
 }
 
-async function fetchAccount(account) {
-  const hadMessages = state.messages.some((message) => message.accountId === account.id);
+async function fetchAccount(account, options = {}) {
+  const append = Boolean(options.append);
+  const existingAccountMessages = state.messages.filter(
+    (message) => message.accountId === account.id && isMessageInActiveScope(message)
+  );
+  const hadMessages = existingAccountMessages.length > 0;
+  const requestedTop = Number(options.top || (append ? 10 : state.visibleByAccount[account.id]) || topSelect.value || 10);
+  const skip = Number(options.skip ?? (append ? existingAccountMessages.length : 0));
+  const nextLink = append && account.nextLinkTop === requestedTop ? account.nextLink || "" : "";
   account.status = "loading";
   account.error = "";
-  account.count = 0;
-  if (!hadMessages) {
+  if (!hadMessages || !append) {
+    account.count = 0;
+  }
+  if (!append) {
+    account.nextLink = "";
+    account.nextLinkTop = 0;
+  }
+  if (!hadMessages || !append) {
     state.selectedMessageKey = null;
   }
   saveState();
@@ -238,7 +375,10 @@ async function fetchAccount(account) {
     },
     body: JSON.stringify({
       account: account.raw,
-      top: topSelect.value,
+      top: requestedTop,
+      skip,
+      next_link: nextLink,
+      scope: state.mailScope,
     }),
   });
 
@@ -247,31 +387,46 @@ async function fetchAccount(account) {
     throw new Error(`${data.error || "读取失败"}${data.details ? `\n${data.details}` : ""}`);
   }
 
-  const existingOtherMessages = state.messages.filter((message) => message.accountId !== account.id);
-  const accountMessages = data.messages.map((message, index) => ({
+  const existingOtherMessages = state.messages.filter(
+    (message) => message.accountId !== account.id || !isMessageInActiveScope(message)
+  );
+  const incomingMessages = data.messages.map((message, index) => ({
     ...message,
-    key: `${account.id}-${message.id || index}`,
+    key: `${account.id}-${message.id || skip + index}`,
     accountId: account.id,
     accountEmail: account.email,
     source: data.source,
+    folder: message.folder || "inbox",
+    folderName: message.folder_name || "",
     verificationCode: extractVerificationCode(message),
   }));
+  const accountMessageMap = new Map();
+  if (append) {
+    existingAccountMessages.forEach((message) => accountMessageMap.set(message.key, message));
+  }
+  incomingMessages.forEach((message) => accountMessageMap.set(message.key, message));
+  const accountMessages = [...accountMessageMap.values()].sort(compareMessageTimeDesc);
 
   state.messages = [...existingOtherMessages, ...accountMessages].sort(compareMessageTimeDesc);
   account.status = "loaded";
   account.source = data.source;
   account.count = accountMessages.length;
+  account.hasMore = Boolean(data.has_more);
+  account.nextLink = data.next_link || "";
+  account.nextLinkTop = account.nextLink ? requestedTop : 0;
   account.lastReadAt = new Date().toISOString();
-  state.visibleByAccount[account.id] = 10;
+  state.visibleByAccount[account.id] = append ? accountMessages.length : requestedTop;
 
-  const visible = getVisibleMessages();
-  state.selectedMessageKey = visible[0]?.key || accountMessages[0]?.key || null;
+  if (!append) {
+    const visible = getVisibleMessages();
+    state.selectedMessageKey = visible[0]?.key || accountMessages[0]?.key || null;
+  }
   saveState();
 }
 
 async function refreshAccount(account, options = {}) {
   try {
-    await fetchAccount(account);
+    await fetchAccount(account, options);
     if (!options.silent) {
       setStatus(`${account.email} 读取完成，共 ${account.count} 封`);
     }
@@ -296,8 +451,9 @@ async function fetchSelectedAccounts() {
   fetchButton.disabled = true;
   const account = state.accounts.find((item) => item.id === state.selectedAccountId) || state.accounts[0];
   state.selectedAccountId = account.id;
-  setStatus(`正在读取 ${account.email}...`);
-  await refreshAccount(account, { silent: true });
+  state.visibleByAccount[account.id] = Number(topSelect.value || 10);
+  setStatus(`正在读取 ${account.email}...`, "loading");
+  await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
   fetchButton.disabled = false;
   setStatus(account.status === "error" ? account.error : `${account.email} 读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
   saveState();
@@ -311,10 +467,30 @@ function compareMessageTimeDesc(left, right) {
 
 function getVisibleAccounts() {
   const query = accountSearch.value.trim().toLowerCase();
-  if (!query) {
-    return state.accounts;
+  const accounts = query
+    ? state.accounts.filter((account) => account.email.toLowerCase().includes(query))
+    : [...state.accounts];
+  return accounts.sort(compareAccounts);
+}
+
+function compareAccounts(left, right) {
+  const emailCompare = left.email.localeCompare(right.email, "zh-CN", { sensitivity: "base" });
+  if (state.accountSort === "emailDesc") {
+    return -emailCompare;
   }
-  return state.accounts.filter((account) => account.email.toLowerCase().includes(query));
+  if (state.accountSort === "createdDesc" || state.accountSort === "createdAsc") {
+    const leftTime = getAccountCreatedTime(left);
+    const rightTime = getAccountCreatedTime(right);
+    const timeCompare = leftTime - rightTime;
+    return state.accountSort === "createdAsc"
+      ? timeCompare || emailCompare
+      : -timeCompare || emailCompare;
+  }
+  return emailCompare;
+}
+
+function getAccountCreatedTime(account) {
+  return new Date(account.createdAt || account.lastReadAt || 0).getTime() || 0;
 }
 
 function getVisibleMessages() {
@@ -322,11 +498,9 @@ function getVisibleMessages() {
     ? state.messages.filter((message) => message.accountId === state.selectedAccountId)
     : state.messages;
 
+  messages = filterMessagesByScope(messages);
   if (state.filter === "unread") {
     messages = messages.filter((message) => !message.is_read);
-  }
-  if (state.filter === "attachments") {
-    messages = messages.filter((message) => message.has_attachments);
   }
   if (state.selectedAccountId) {
     const visibleCount = state.visibleByAccount[state.selectedAccountId] || 10;
@@ -337,16 +511,35 @@ function getVisibleMessages() {
 
 function getAllFilteredMessagesForSelectedAccount() {
   if (!state.selectedAccountId) {
-    return state.messages;
+    return filterMessagesByScope(state.messages);
   }
   let messages = state.messages.filter((message) => message.accountId === state.selectedAccountId);
+  messages = filterMessagesByScope(messages);
   if (state.filter === "unread") {
     messages = messages.filter((message) => !message.is_read);
   }
-  if (state.filter === "attachments") {
-    messages = messages.filter((message) => message.has_attachments);
+  return messages;
+}
+
+function filterMessagesByScope(messages) {
+  if (state.mailScope === "junk") {
+    return messages.filter((message) => isJunkMessage(message));
+  }
+  if (state.mailScope === "nonjunk" || state.mailScope === "all") {
+    return messages.filter((message) => !isJunkMessage(message));
   }
   return messages;
+}
+
+function isJunkMessage(message) {
+  return message.folder === "junk";
+}
+
+function isMessageInActiveScope(message) {
+  if (state.mailScope === "junk") {
+    return isJunkMessage(message);
+  }
+  return !isJunkMessage(message);
 }
 
 function getSelectedMessage() {
@@ -457,9 +650,9 @@ function renderMessages() {
   const allFilteredMessages = getAllFilteredMessagesForSelectedAccount();
   const total = allFilteredMessages.length;
   const selectedAccount = state.accounts.find((account) => account.id === state.selectedAccountId);
-  mailSummary.textContent = selectedAccount
-    ? `${selectedAccount.email} · 已显示 ${messages.length}/${total} 封`
-    : `全部邮箱 · ${total} 封`;
+  mailSummary.innerHTML = selectedAccount
+    ? `<span class="summary-title-row"><span class="summary-title">邮件</span><span class="summary-count">已显示 ${messages.length}/${total} 封</span></span><button class="summary-current-email" type="button" data-copy-current-email="${escapeHtml(selectedAccount.email)}" title="点击复制邮箱"><span>当前邮箱：${escapeHtml(selectedAccount.email)}</span></button>`
+    : `<span class="summary-title-row"><span class="summary-title">邮件</span><span class="summary-count">${total} 封</span></span><span class="summary-current-email muted"><span>当前邮箱：未选择</span></span>`;
 
   if (selectedAccount?.status === "loading" && !messages.length) {
     messageList.innerHTML = `
@@ -482,11 +675,13 @@ function renderMessages() {
     return;
   }
 
-  const hasMore = state.selectedAccountId && messages.length < total;
+  const hasMore = Boolean(state.selectedAccountId && selectedAccount?.hasMore);
   messageList.innerHTML = messages
     .map((message) => {
       const selected = message.key === state.selectedMessageKey ? "selected" : "";
       const from = message.from_name || message.from_address || "未知发件人";
+      const folderLabel = isJunkMessage(message) ? "垃圾邮件" : "收件箱";
+      const folderClass = isJunkMessage(message) ? "junk" : "inbox";
       const codeBadge = message.verificationCode
         ? `<button class="code-badge" type="button" data-code="${escapeHtml(message.verificationCode)}" title="点击复制疑似验证码">${escapeHtml(message.verificationCode)}</button>`
         : "";
@@ -504,7 +699,7 @@ function renderMessages() {
             </div>
             <p>${escapeHtml(message.preview || message.body_text || message.body || "")}</p>
             <div class="mail-tags">
-              <span class="tag inbox">收件箱</span>
+              <span class="tag ${folderClass}">${folderLabel}</span>
               <span>${escapeHtml(message.accountEmail)}</span>
               ${message.has_attachments ? '<span class="tag">附件</span>' : ""}
             </div>
@@ -515,7 +710,7 @@ function renderMessages() {
     .join("") + (hasMore ? `
       <button class="load-more" type="button" data-load-more>
         加载更多
-        <span>再显示 ${Math.min(10, total - messages.length)} 封</span>
+        <span>点击再读取 10 封</span>
       </button>
     ` : "");
 }
@@ -543,7 +738,7 @@ function renderDetail() {
   const content = renderMessageContent(message);
   const codePanel = message.verificationCode
     ? `<button class="detail-code" type="button" data-code="${escapeHtml(message.verificationCode)}">
-        <span>疑似验证码</span><strong>${escapeHtml(message.verificationCode)}</strong><em>点击复制</em>
+        <span class="detail-code-inner"><span>疑似验证码</span><strong>${escapeHtml(message.verificationCode)}</strong><em>点击复制</em></span>
       </button>`
     : "";
 
@@ -639,11 +834,20 @@ confirmModal.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeCustomSelects();
+  }
   if (event.key === "Escape" && accountModal.classList.contains("open")) {
     closeAccountModal();
   }
   if (event.key === "Escape" && confirmModal.classList.contains("open")) {
     closeConfirmModal();
+  }
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("[data-select-wrap]")) {
+    closeCustomSelects();
   }
 });
 
@@ -653,6 +857,18 @@ clearAccountsButton.addEventListener("click", () => {
 });
 
 accountSearch.addEventListener("input", renderAccounts);
+
+sortSelect.addEventListener("change", () => {
+  state.accountSort = normalizeAccountSort(sortSelect.value);
+  sortSelect.value = state.accountSort;
+  syncCustomSelect(sortSelect);
+  saveState();
+  renderAccounts();
+});
+
+topSelect.addEventListener("change", () => {
+  syncCustomSelect(topSelect);
+});
 
 fetchButton.addEventListener("click", fetchSelectedAccounts);
 
@@ -685,10 +901,11 @@ accountList.addEventListener("click", async (event) => {
     return;
   }
   state.selectedAccountId = account.id;
+  state.visibleByAccount[account.id] = Number(topSelect.value || 10);
   saveState();
   render();
-  setStatus(`正在读取 ${account.email}...`);
-  await refreshAccount(account, { silent: true });
+  setStatus(`正在读取 ${account.email}...`, "loading");
+  await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
   setStatus(account.status === "error" ? account.error : `${account.email} 读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
 });
 
@@ -707,10 +924,29 @@ accountList.addEventListener("keydown", async (event) => {
 messageList.addEventListener("click", async (event) => {
   const loadMoreButton = event.target.closest("[data-load-more]");
   if (loadMoreButton) {
-    const current = state.visibleByAccount[state.selectedAccountId] || 10;
-    state.visibleByAccount[state.selectedAccountId] = current + 10;
-    saveState();
-    render();
+    const account = state.accounts.find((item) => item.id === state.selectedAccountId);
+    if (!account) {
+      return;
+    }
+    if (loadMoreButton.disabled) {
+      return;
+    }
+    const beforeCount = state.messages.filter((message) => message.accountId === account.id).length;
+    loadMoreButton.disabled = true;
+    loadMoreButton.innerHTML = `加载中<span>正在读取后 10 封</span>`;
+    setStatus(`正在为 ${account.email} 加载更多邮件...`, "loading");
+    await refreshAccount(account, { silent: true, top: 10, append: true });
+    if (account.status === "error") {
+      loadMoreButton.disabled = false;
+      setStatus(account.error, "error");
+      return;
+    }
+    const addedCount = Math.max(0, account.count - beforeCount);
+    setStatus(
+      account.hasMore
+        ? `${account.email} 新增读取 ${addedCount} 封，当前共 ${account.count} 封`
+        : `${account.email} 新增读取 ${addedCount} 封，已到最后一封`
+    );
     return;
   }
 
@@ -730,6 +966,14 @@ messageList.addEventListener("click", async (event) => {
   render();
 });
 
+mailSummary.addEventListener("click", async (event) => {
+  const copyButton = event.target.closest("[data-copy-current-email]");
+  if (!copyButton) {
+    return;
+  }
+  await copyText(copyButton.dataset.copyCurrentEmail, "已复制当前邮箱");
+});
+
 detail.addEventListener("click", async (event) => {
   const codeButton = event.target.closest("[data-code]");
   if (codeButton) {
@@ -738,9 +982,22 @@ detail.addEventListener("click", async (event) => {
 });
 
 folderTabs.forEach((tab) => {
-  tab.addEventListener("click", () => {
+  tab.addEventListener("click", async () => {
     state.filter = tab.dataset.filter;
+    state.mailScope = state.filter === "junk" ? "junk" : "nonjunk";
     folderTabs.forEach((item) => item.classList.toggle("active", item === tab));
+    saveState();
+    render();
+    if (state.filter === "junk") {
+      const account = state.accounts.find((item) => item.id === state.selectedAccountId);
+      const hasJunkMessages = account && state.messages.some((message) => message.accountId === account.id && isJunkMessage(message));
+      if (account && !hasJunkMessages && account.status !== "loading") {
+        state.visibleByAccount[account.id] = Number(topSelect.value || 10);
+        setStatus(`正在读取 ${account.email} 的垃圾邮件...`, "loading");
+        await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
+        setStatus(account.status === "error" ? account.error : `${account.email} 垃圾邮件读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
+      }
+    }
     const messages = getVisibleMessages();
     state.selectedMessageKey = messages[0]?.key || null;
     saveState();
@@ -768,5 +1025,6 @@ confirmClearButton.addEventListener("click", () => {
   closeConfirmModal();
 });
 
+customSelects.forEach(buildCustomSelect);
 loadSavedState();
 render();

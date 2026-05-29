@@ -30,16 +30,25 @@
 
         <section class="account-tools">
           <div class="tool-row">
-            <span>排序</span>
-            <button class="chip active" type="button">邮箱名</button>
+            <label for="sort-select">排序</label>
+            <div class="select-wrap" data-select-wrap>
+              <select id="sort-select" data-custom-select>
+                <option value="emailAsc">邮箱名 A-Z</option>
+                <option value="emailDesc">邮箱名 Z-A</option>
+                <option value="createdDesc">导入时间 新-旧</option>
+                <option value="createdAsc">导入时间 旧-新</option>
+              </select>
+            </div>
           </div>
           <div class="tool-row">
-            <span>每页</span>
-            <select id="top-select">
-              <option value="10">10</option>
-              <option value="20">20</option>
-              <option value="50">50</option>
-            </select>
+            <label for="top-select">每页</label>
+            <div class="select-wrap compact" data-select-wrap>
+              <select id="top-select" data-custom-select>
+                <option value="10">10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+              </select>
+            </div>
           </div>
         </section>
 
@@ -49,16 +58,15 @@
       <section class="message-pane">
         <header class="message-head">
           <div>
-            <h2>邮件</h2>
             <p id="mail-summary">添加邮箱后读取邮件</p>
           </div>
           <button id="fetch-button" type="button">获取邮件</button>
         </header>
 
         <nav class="folder-tabs" aria-label="邮件筛选">
-          <button class="folder-tab active" type="button" data-filter="all">全部邮件</button>
+          <button class="folder-tab active" type="button" data-filter="all">收件箱<span>非垃圾邮件</span></button>
           <button class="folder-tab" type="button" data-filter="unread">未读</button>
-          <button class="folder-tab" type="button" data-filter="attachments">有附件</button>
+          <button class="folder-tab" type="button" data-filter="junk">垃圾邮件</button>
         </nav>
 
         <div id="status" class="status" aria-live="polite"></div>
@@ -93,7 +101,14 @@
           </div>
           <button class="modal-close" type="button" data-close-modal>×</button>
         </header>
-        <label for="account-input">每行一个邮箱</label>
+        <div class="account-format-note">
+          <label for="account-input">每行一个邮箱</label>
+          <p>
+            支持两种格式，系统会自动识别 <code>client_id</code> 和 <code>refresh_token</code> 的位置。读取邮件实际使用的是
+            <code>client_id + refresh_token</code> 换取访问令牌；中间的“密码”字段只是兼容原始账号格式的占位，不参与登录校验，
+            不需要真实密码，可以任意填写。每行只保留 4 段，用 <strong>----</strong> 分隔。
+          </p>
+        </div>
         <textarea
           id="account-input"
           spellcheck="false"
