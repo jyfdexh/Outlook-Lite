@@ -3,7 +3,7 @@
 Outlook Lite 是一个轻量级 Outlook 邮件读取工具。它专注做一件事：用 `client_id + refresh_token` 读取 Outlook 邮件，自动识别令牌顺序，并在界面里高亮可能的验证码。
 
 项目不使用数据库，不需要第三方 Python 依赖，直接用 Python 标准库启动本地 Web 服务。
-
+###                                                                     sudo outlook-lite-update
 ## 功能
 
 - 支持两种 Outlook 令牌格式自动识别：
