@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="biophilic">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -11,8 +11,7 @@
       <aside class="account-pane">
         <header class="pane-head">
           <div>
-            <div class="eyebrow">Outlook</div>
-            <h1>邮箱列表</h1>
+            <h1>Outlook Lite<br />令牌取件</h1>
           </div>
           <button id="add-account-button" class="add-account-trigger" type="button" title="添加邮箱">
             <span>+</span>
@@ -24,19 +23,15 @@
           <input id="account-search" type="search" placeholder="搜索邮箱" autocomplete="off" />
         </div>
 
-        <div class="storage-tools">
-          <button id="clear-storage-button" class="storage-clear" type="button">清空本地邮箱</button>
-        </div>
-
         <section class="account-tools">
           <div class="tool-row">
             <label for="sort-select">排序</label>
             <div class="select-wrap" data-select-wrap>
               <select id="sort-select" data-custom-select>
-                <option value="emailAsc">邮箱名 A-Z</option>
-                <option value="emailDesc">邮箱名 Z-A</option>
                 <option value="createdDesc">导入时间 新-旧</option>
                 <option value="createdAsc">导入时间 旧-新</option>
+                <option value="emailAsc">邮箱名 A-Z</option>
+                <option value="emailDesc">邮箱名 Z-A</option>
               </select>
             </div>
           </div>
@@ -45,8 +40,8 @@
             <div class="select-wrap compact" data-select-wrap>
               <select id="top-select" data-custom-select>
                 <option value="10">10</option>
-                <option value="20">20</option>
-                <option value="50">50</option>
+                <option value="20" disabled>20</option>
+                <option value="50" disabled>50</option>
               </select>
             </div>
           </div>
@@ -64,10 +59,14 @@
         </header>
 
         <nav class="folder-tabs" aria-label="邮件筛选">
-          <button class="folder-tab active" type="button" data-filter="all">收件箱<span>非垃圾邮件</span></button>
-          <button class="folder-tab" type="button" data-filter="unread">未读</button>
+          <button class="folder-tab active" type="button" data-filter="all">收件箱</button>
           <button class="folder-tab" type="button" data-filter="junk">垃圾邮件</button>
+          <button class="folder-tab" type="button" data-filter="unread">未读</button>
         </nav>
+
+        <div class="message-search">
+          <input id="message-search" type="search" placeholder="搜索标题、发件人、邮箱或验证码" autocomplete="off" />
+        </div>
 
         <div id="status" class="status" aria-live="polite"></div>
         <section id="message-list" class="message-list" aria-label="邮件列表"></section>
@@ -76,10 +75,20 @@
       <section class="detail-pane">
         <header class="detail-toolbar">
           <button id="toggle-source-button" class="toolbar-button" type="button">显示邮件源</button>
-          <label class="trust-check">
-            <input id="trust-mail-checkbox" type="checkbox" />
-            信任此邮件
-          </label>
+          <div id="theme-switcher" class="theme-switcher">
+            <button id="theme-toggle-button" class="theme-toggle-button" type="button" aria-label="更换主题" aria-expanded="false">
+              <span>主题</span>
+              <strong>亲生物设计</strong>
+            </button>
+            <div id="theme-menu" class="theme-menu" role="menu" aria-label="主题选择"></div>
+          </div>
+          <div class="data-actions toolbar-data-actions" aria-label="本地邮箱数据">
+            <button id="import-accounts-button" class="tool-action" type="button" aria-label="导入本地邮箱令牌列表文件" data-tooltip="导入本地邮箱令牌列表文件">导入</button>
+            <button id="export-accounts-button" class="tool-action" type="button" aria-label="导出当前邮箱令牌列表到文件" data-tooltip="导出当前邮箱令牌列表到文件">导出</button>
+            <button id="clear-cache-button" class="tool-action" type="button" aria-label="清空已读取邮件缓存，不删除邮箱令牌" data-tooltip="清空已读取邮件缓存，不删除邮箱令牌">清缓存</button>
+            <input id="import-accounts-file" type="file" accept=".txt,.json,text/plain,application/json" hidden />
+          </div>
+          <button id="clear-storage-button" class="storage-clear toolbar-clear" type="button">清空本地邮箱</button>
         </header>
 
         <article id="message-detail" class="message-detail empty">
@@ -114,6 +123,9 @@
           autocomplete="off"
           placeholder="每行一个邮箱令牌，支持下列2种格式&#10;邮箱----密码----client_id----refresh_token&#10;邮箱----密码----refresh_token----client_id"
         ></textarea>
+        <div id="account-input-check" class="account-input-check" aria-live="polite">
+          <span>等待输入邮箱令牌</span>
+        </div>
         <footer class="modal-actions">
           <button id="clear-accounts-button" class="ghost" type="button">清空</button>
           <button id="save-accounts-button" type="submit">添加邮箱</button>
@@ -128,7 +140,7 @@
           <div class="eyebrow">确认操作</div>
           <h2 id="confirm-title">清空本地邮箱？</h2>
         </header>
-        <p>这会删除本机浏览器保存的邮箱、邮件缓存和当前选择状态。此操作不会影响 Outlook 邮箱本身。</p>
+        <p id="confirm-message">这会删除本机浏览器保存的邮箱、邮件缓存和当前选择状态。此操作不会影响 Outlook 邮箱本身。</p>
         <footer>
           <button id="cancel-clear-button" class="ghost" type="button" data-close-confirm>取消</button>
           <button id="confirm-clear-button" class="danger" type="button">确认清空</button>

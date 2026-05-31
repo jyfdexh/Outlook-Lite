@@ -8,32 +8,64 @@ const state = {
   showSource: false,
   visibleByAccount: {},
   accountSort: "createdDesc",
+  messageSearch: "",
 };
 
 const STORAGE_KEY = "outlook-mail-lite-state-v1";
+const THEME_STORAGE_KEY = "outlook-mail-lite-theme";
+const HIGHLIGHT_COLOR_STORAGE_KEY = "outlook-mail-lite-highlight-color";
+const DEFAULT_HIGHLIGHT_COLOR = "#111827";
+const THEMES = {
+  minimal: "极简主义",
+  aurora: "极光玻璃",
+  clay: "黏土质感",
+  dark: "深色模式",
+  gradients: "Gradients 渐变",
+  glow: "发光",
+  natural: "Natural 自然",
+  utility: "实用优先",
+  y2k: "Y2K",
+  pointer: "鼠标追踪",
+  accessible: "无障碍设计",
+  biophilic: "亲生物设计",
+};
+const DEFAULT_THEME = "biophilic";
+const THEME_ORDER = Object.keys(THEMES);
+let pendingConfirmAction = null;
 
 const accountForm = document.querySelector("#account-form");
 const accountInput = document.querySelector("#account-input");
+const accountInputCheck = document.querySelector("#account-input-check");
 const accountSearch = document.querySelector("#account-search");
 const accountList = document.querySelector("#account-list");
 const accountModal = document.querySelector("#account-modal");
 const confirmModal = document.querySelector("#confirm-modal");
+const confirmTitle = document.querySelector("#confirm-title");
+const confirmMessage = document.querySelector("#confirm-message");
 const addAccountButton = document.querySelector("#add-account-button");
 const clearAccountsButton = document.querySelector("#clear-accounts-button");
 const clearStorageButton = document.querySelector("#clear-storage-button");
+const clearCacheButton = document.querySelector("#clear-cache-button");
 const confirmClearButton = document.querySelector("#confirm-clear-button");
+const exportAccountsButton = document.querySelector("#export-accounts-button");
+const importAccountsButton = document.querySelector("#import-accounts-button");
+const importAccountsFile = document.querySelector("#import-accounts-file");
 const fetchButton = document.querySelector("#fetch-button");
 const sortSelect = document.querySelector("#sort-select");
 const topSelect = document.querySelector("#top-select");
 const mailSummary = document.querySelector("#mail-summary");
 const statusBox = document.querySelector("#status");
 const messageList = document.querySelector("#message-list");
+const messageSearch = document.querySelector("#message-search");
 const detail = document.querySelector("#message-detail");
 const folderTabs = document.querySelectorAll(".folder-tab");
 const toggleSourceButton = document.querySelector("#toggle-source-button");
 const trustMailCheckbox = document.querySelector("#trust-mail-checkbox");
 const toast = document.querySelector("#toast");
 const customSelects = document.querySelectorAll("[data-custom-select]");
+const themeSwitcher = document.querySelector("#theme-switcher");
+const themeToggleButton = document.querySelector("#theme-toggle-button");
+const themeMenu = document.querySelector("#theme-menu");
 const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 const ACCOUNT_SORT_VALUES = new Set(["emailAsc", "emailDesc", "createdDesc", "createdAsc"]);
 const MAIL_SCOPE_LABELS = {
@@ -41,35 +73,133 @@ const MAIL_SCOPE_LABELS = {
   nonjunk: "非垃圾邮件",
   junk: "仅垃圾邮件",
 };
+const pointerState = {
+  x: window.innerWidth / 2,
+  y: window.innerHeight / 2,
+  frame: 0,
+};
+
+function normalizeTheme(value) {
+  return Object.prototype.hasOwnProperty.call(THEMES, value) ? value : DEFAULT_THEME;
+}
+
+function applyTheme(theme) {
+  const normalized = normalizeTheme(theme);
+  document.documentElement.dataset.theme = normalized;
+  if (themeToggleButton) {
+    const themeName = themeToggleButton.querySelector("strong");
+    if (themeName) {
+      themeName.textContent = THEMES[normalized];
+    }
+    themeToggleButton.title = `当前主题：${THEMES[normalized]}`;
+    themeToggleButton.setAttribute("aria-label", `更换主题，当前：${THEMES[normalized]}`);
+    themeToggleButton.setAttribute("data-current-theme", normalized);
+  }
+  themeMenu?.querySelectorAll("[data-theme-value]").forEach((item) => {
+    const isActive = item.dataset.themeValue === normalized;
+    item.classList.toggle("active", isActive);
+    item.setAttribute("aria-checked", isActive ? "true" : "false");
+  });
+  return normalized;
+}
+
+function loadTheme() {
+  return applyTheme(localStorage.getItem(THEME_STORAGE_KEY));
+}
+
+function closeThemeMenu() {
+  themeSwitcher?.classList.remove("open");
+  themeToggleButton?.setAttribute("aria-expanded", "false");
+}
+
+function toggleThemeMenu() {
+  const isOpen = themeSwitcher?.classList.toggle("open");
+  themeToggleButton?.setAttribute("aria-expanded", isOpen ? "true" : "false");
+}
+
+function setTheme(theme) {
+  const normalized = normalizeTheme(theme);
+  localStorage.setItem(THEME_STORAGE_KEY, normalized);
+  applyTheme(normalized);
+  closeThemeMenu();
+  showToast(`已切换为${THEMES[normalized]}`);
+}
+
+function buildThemeMenu() {
+  if (!themeMenu) {
+    return;
+  }
+  themeMenu.innerHTML = THEME_ORDER.map(
+    (theme) => `<button class="theme-menu-item" type="button" role="menuitemradio" aria-checked="false" data-theme-value="${theme}">
+      <span>${escapeHtml(THEMES[theme])}</span>
+    </button>`
+  ).join("");
+}
+
+function normalizeHighlightColor(value) {
+  return /^#[0-9a-f]{6}$/i.test(value || "") ? value : DEFAULT_HIGHLIGHT_COLOR;
+}
+
+function applyHighlightColor(value) {
+  const color = normalizeHighlightColor(value);
+  document.documentElement.style.setProperty("--email-highlight", color);
+  return color;
+}
+
+function loadHighlightColor() {
+  return applyHighlightColor(localStorage.getItem(HIGHLIGHT_COLOR_STORAGE_KEY));
+}
+
+function setHighlightColor(value) {
+  const color = applyHighlightColor(value);
+  localStorage.setItem(HIGHLIGHT_COLOR_STORAGE_KEY, color);
+}
+
+function updatePointerPosition(event) {
+  pointerState.x = event.clientX;
+  pointerState.y = event.clientY;
+  if (pointerState.frame) {
+    return;
+  }
+  pointerState.frame = window.requestAnimationFrame(() => {
+    document.documentElement.style.setProperty("--pointer-x", `${pointerState.x}px`);
+    document.documentElement.style.setProperty("--pointer-y", `${pointerState.y}px`);
+    pointerState.frame = 0;
+  });
+}
 
 function loadSavedState() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
-    state.accounts = Array.isArray(saved.accounts) ? saved.accounts : [];
-    state.messages = Array.isArray(saved.messages) ? saved.messages : [];
-    state.selectedAccountId = saved.selectedAccountId || state.accounts[0]?.id || null;
-    state.selectedMessageKey = saved.selectedMessageKey || null;
-    state.filter = saved.filter || "all";
-    state.mailScope = normalizeMailScope(saved.mailScope);
-    state.accountSort = normalizeAccountSort(saved.accountSort);
-    state.visibleByAccount = saved.visibleByAccount && typeof saved.visibleByAccount === "object" ? saved.visibleByAccount : {};
+    state.accounts = Array.isArray(saved.accounts) ? saved.accounts.map(normalizeSavedAccount) : [];
+    state.messages = [];
+    state.selectedAccountId = state.accounts[0]?.id || null;
+    state.selectedMessageKey = null;
+    state.filter = "all";
+    state.mailScope = "nonjunk";
+    state.accountSort = "createdDesc";
+    state.visibleByAccount = {};
+    state.messageSearch = "";
     state.accounts.forEach((account) => {
       account.status = account.status || "idle";
       account.source = account.source || "";
       account.error = account.error || "";
+      account.errorDetails = account.errorDetails || "";
       account.count = Number(account.count || 0);
-      account.hasMore = Boolean(account.hasMore);
-      account.nextLink = account.nextLink || "";
-      account.nextLinkTop = Number(account.nextLinkTop || 0);
+      account.hasMore = false;
+      account.nextLink = "";
+      account.nextLinkTop = 0;
       account.lastReadAt = account.lastReadAt || "";
       account.createdAt = account.createdAt || account.lastReadAt || "";
     });
-    state.messages.forEach((message) => {
-      message.verificationCode = message.verificationCode || extractVerificationCode(message);
-    });
     sortSelect.value = state.accountSort;
+    topSelect.value = "10";
+    if (messageSearch) {
+      messageSearch.value = "";
+    }
     syncCustomSelect(sortSelect);
     syncCustomSelect(topSelect);
+    saveState();
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -77,17 +207,79 @@ function loadSavedState() {
 
 function saveState() {
   const payload = {
-    accounts: state.accounts,
-    messages: state.messages,
-    selectedAccountId: state.selectedAccountId,
-    selectedMessageKey: state.selectedMessageKey,
-    filter: state.filter,
-    mailScope: state.mailScope,
-    accountSort: state.accountSort,
-    visibleByAccount: state.visibleByAccount,
+    accounts: state.accounts.map(serializeAccountForStorage),
     savedAt: new Date().toISOString(),
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+}
+
+function normalizeSavedAccount(account) {
+  return {
+    id: account.id || createId("account"),
+    email: account.email || getEmailFromLine(account.raw || ""),
+    raw: account.raw || "",
+    status: "idle",
+    source: "",
+    error: "",
+    errorDetails: "",
+    count: 0,
+    hasMore: false,
+    nextLink: "",
+    nextLinkTop: 0,
+    lastReadAt: account.lastReadAt || "",
+    createdAt: account.createdAt || account.lastReadAt || new Date().toISOString(),
+  };
+}
+
+function serializeAccountForStorage(account) {
+  return {
+    id: account.id,
+    email: account.email,
+    raw: account.raw,
+    lastReadAt: account.lastReadAt || "",
+    createdAt: account.createdAt || "",
+  };
+}
+
+function resetAccountRuntimeState(account) {
+  account.status = "idle";
+  account.error = "";
+  account.errorDetails = "";
+  account.count = 0;
+  account.hasMore = false;
+  account.nextLink = "";
+  account.nextLinkTop = 0;
+}
+
+function clearMessageCache() {
+  state.messages = [];
+  state.selectedMessageKey = null;
+  state.messageSearch = "";
+  if (messageSearch) {
+    messageSearch.value = "";
+  }
+  state.accounts.forEach(resetAccountRuntimeState);
+  saveState();
+  setStatus("邮件缓存已清空，邮箱列表已保留。");
+  showToast("已清空邮件缓存");
+  render();
+}
+
+function showInitialCacheNotice() {
+  if (!state.accounts.length || state.messages.length) {
+    return;
+  }
+  const readableTime = state.accounts
+    .map((account) => account.lastReadAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+  setStatus(
+    readableTime
+      ? `已加载 ${state.accounts.length} 个本地邮箱。为保护令牌环境，本地只保存邮箱列表；上次读取时间 ${formatDate(readableTime)}，邮件内容需手动重新读取。`
+      : `已加载 ${state.accounts.length} 个本地邮箱。当前不保存邮件缓存，点击“获取邮件”读取最新邮件。`,
+    "info"
+  );
 }
 
 function clearSavedState() {
@@ -101,10 +293,38 @@ function clearSavedState() {
   state.accountSort = "createdDesc";
   state.visibleByAccount = {};
   sortSelect.value = state.accountSort;
+  topSelect.value = "10";
   syncCustomSelect(sortSelect);
+  syncCustomSelect(topSelect);
   folderTabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.filter === "all"));
   setStatus("本地邮箱数据已清空");
   showToast("已清空本地邮箱");
+  render();
+}
+
+function deleteAccount(accountId) {
+  const account = state.accounts.find((item) => item.id === accountId);
+  if (!account) {
+    return;
+  }
+
+  state.accounts = state.accounts.filter((item) => item.id !== accountId);
+  state.messages = state.messages.filter((message) => message.accountId !== accountId);
+  delete state.visibleByAccount[accountId];
+
+  if (state.selectedAccountId === accountId) {
+    state.selectedAccountId = state.accounts[0]?.id || null;
+    state.selectedMessageKey = null;
+  } else if (state.selectedMessageKey) {
+    const selectedStillExists = state.messages.some((message) => message.key === state.selectedMessageKey);
+    if (!selectedStillExists) {
+      state.selectedMessageKey = null;
+    }
+  }
+
+  saveState();
+  setStatus(`已删除 ${account.email}`);
+  showToast("邮箱已删除");
   render();
 }
 
@@ -159,6 +379,90 @@ function getEmailFromLine(line) {
   return line.split("----")[0]?.trim() || "";
 }
 
+function isUuidLike(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || "").trim());
+}
+
+function validateAccountLine(line) {
+  const parts = String(line || "").split("----").map((part) => part.trim());
+  if (parts.length !== 4) {
+    return { valid: false, reason: `需要 4 段，当前 ${parts.length} 段` };
+  }
+  const [email, , third, fourth] = parts;
+  if (!email) {
+    return { valid: false, reason: "邮箱为空" };
+  }
+  if (!email.includes("@")) {
+    return { valid: false, reason: "邮箱格式异常" };
+  }
+  const thirdIsClientId = isUuidLike(third);
+  const fourthIsClientId = isUuidLike(fourth);
+  if (thirdIsClientId === fourthIsClientId) {
+    return { valid: false, reason: "无法识别 client_id 位置" };
+  }
+  const refreshToken = thirdIsClientId ? fourth : third;
+  if (!refreshToken || refreshToken.length < 20) {
+    return { valid: false, reason: "refresh_token 过短或为空" };
+  }
+  return { valid: true, email };
+}
+
+function analyzeAccountInput() {
+  const lines = accountInput.value.split(/\r?\n/);
+  const result = {
+    total: 0,
+    valid: 0,
+    duplicate: 0,
+    invalid: 0,
+    errors: [],
+  };
+  const seenEmails = new Set();
+  lines.forEach((rawLine, index) => {
+    const line = rawLine.trim();
+    if (!line) {
+      return;
+    }
+    result.total += 1;
+    const validation = validateAccountLine(line);
+    if (!validation.valid) {
+      result.invalid += 1;
+      result.errors.push(`第 ${index + 1} 行：${validation.reason}`);
+      return;
+    }
+    const emailKey = validation.email.toLowerCase();
+    const exists = state.accounts.some((account) => account.email.toLowerCase() === emailKey);
+    if (seenEmails.has(emailKey) || exists) {
+      result.duplicate += 1;
+      result.errors.push(`第 ${index + 1} 行：邮箱重复`);
+      return;
+    }
+    seenEmails.add(emailKey);
+    result.valid += 1;
+  });
+  return result;
+}
+
+function renderAccountInputCheck() {
+  if (!accountInputCheck) {
+    return;
+  }
+  const result = analyzeAccountInput();
+  if (!result.total) {
+    accountInputCheck.className = "account-input-check idle";
+    accountInputCheck.innerHTML = "<span>等待输入邮箱令牌</span>";
+    return;
+  }
+  const isAllValid = result.valid === result.total;
+  accountInputCheck.className = `account-input-check ${isAllValid ? "ok" : "warning"}`;
+  const errorHtml = result.errors.length
+    ? `<small>${result.errors.slice(0, 3).map(escapeHtml).join("；")}${result.errors.length > 3 ? "；..." : ""}</small>`
+    : "";
+  accountInputCheck.innerHTML = `
+    <span>检测到 <strong>${result.total}</strong> 个令牌，格式正确 <strong>${result.valid}</strong> 个，错误 <strong>${result.invalid}</strong> 个，重复 <strong>${result.duplicate}</strong> 个</span>
+    ${errorHtml}
+  `;
+}
+
 function setStatus(message, type = "") {
   if (type === "loading" && message) {
     statusBox.innerHTML = `<span class="status-spinner" aria-hidden="true"></span><span>${escapeHtml(message)}</span>`;
@@ -166,6 +470,31 @@ function setStatus(message, type = "") {
     statusBox.textContent = message || "";
   }
   statusBox.className = `status ${message ? "visible" : ""} ${type}`.trim();
+}
+
+function setStatusError(message, fallback = "读取失败") {
+  const { summary, details } = splitErrorMessage(message, fallback);
+  if (details) {
+    statusBox.innerHTML = `
+      <span>${escapeHtml(summary)}</span>
+      <details>
+        <summary>查看技术详情</summary>
+        <pre>${escapeHtml(details)}</pre>
+      </details>
+    `;
+  } else {
+    statusBox.textContent = summary;
+  }
+  statusBox.className = "status visible error";
+}
+
+function splitErrorMessage(message, fallback = "读取失败") {
+  const lines = String(message || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const summary = lines.shift() || fallback;
+  return { summary, details: lines.join("\n") };
 }
 
 function showToast(message) {
@@ -207,7 +536,13 @@ function buildCustomSelect(select) {
     item.dataset.value = option.value;
     item.setAttribute("role", "option");
     item.textContent = option.textContent;
+    item.disabled = option.disabled;
+    item.classList.toggle("disabled", option.disabled);
+    item.setAttribute("aria-disabled", String(option.disabled));
     item.addEventListener("click", () => {
+      if (option.disabled) {
+        return;
+      }
       select.value = option.value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       closeCustomSelects();
@@ -251,9 +586,28 @@ function closeCustomSelects() {
   });
 }
 
+function closeAccountMenus() {
+  document.querySelectorAll(".account-card.menu-open").forEach((card) => {
+    card.classList.remove("menu-open");
+    card.querySelector("[data-account-menu-toggle]")?.setAttribute("aria-expanded", "false");
+  });
+}
+
+function toggleAccountMenu(toggle) {
+  const card = toggle.closest(".account-card");
+  if (!card) {
+    return;
+  }
+  const willOpen = !card.classList.contains("menu-open");
+  closeAccountMenus();
+  card.classList.toggle("menu-open", willOpen);
+  toggle.setAttribute("aria-expanded", String(willOpen));
+}
+
 function openAccountModal() {
   accountModal.classList.add("open");
   accountModal.setAttribute("aria-hidden", "false");
+  renderAccountInputCheck();
   window.setTimeout(() => accountInput.focus(), 30);
 }
 
@@ -262,7 +616,12 @@ function closeAccountModal() {
   accountModal.setAttribute("aria-hidden", "true");
 }
 
-function openConfirmModal() {
+function openConfirmModal(options = {}) {
+  pendingConfirmAction = typeof options.onConfirm === "function" ? options.onConfirm : clearSavedState;
+  confirmTitle.textContent = options.title || "清空本地邮箱？";
+  confirmMessage.textContent =
+    options.message || "这会删除本机浏览器保存的邮箱、邮件缓存和当前选择状态。此操作不会影响 Outlook 邮箱本身。";
+  confirmClearButton.textContent = options.confirmText || "确认清空";
   confirmModal.classList.add("open");
   confirmModal.setAttribute("aria-hidden", "false");
 }
@@ -270,34 +629,35 @@ function openConfirmModal() {
 function closeConfirmModal() {
   confirmModal.classList.remove("open");
   confirmModal.setAttribute("aria-hidden", "true");
+  pendingConfirmAction = null;
 }
 
 async function addAccountsFromInput() {
-  const lines = accountInput.value
-    .split(/\r?\n/)
-    .map((line) => line.trim());
+  const result = addAccountsFromLines(accountInput.value.split(/\r?\n/));
 
+  accountInput.value = "";
+  closeAccountModal();
+  render();
+  showAddAccountsResult(result);
+}
+
+function addAccountsFromLines(rawLines) {
+  const lines = rawLines.map((line) => String(line || "").trim());
   const addedAccounts = [];
   const failures = [];
-  let blankCount = 0;
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     if (!line) {
-      blankCount += 1;
       continue;
     }
-    const parts = line.split("----").map((part) => part.trim());
-    if (parts.length < 4) {
-      failures.push({ line, reason: "格式不完整" });
+    const validation = validateAccountLine(line);
+    if (!validation.valid) {
+      failures.push({ line, reason: `第 ${index + 1} 行：${validation.reason}` });
       continue;
     }
-    const email = getEmailFromLine(line);
-    if (!email) {
-      failures.push({ line, reason: "邮箱为空" });
-      continue;
-    }
+    const email = validation.email;
     const exists = state.accounts.some((account) => account.email.toLowerCase() === email.toLowerCase());
     if (exists) {
-      failures.push({ line, reason: "邮箱已存在" });
+      failures.push({ line, reason: `第 ${index + 1} 行：邮箱已存在` });
       continue;
     }
     const account = {
@@ -307,6 +667,7 @@ async function addAccountsFromInput() {
       status: "idle",
       source: "",
       error: "",
+      errorDetails: "",
       count: 0,
       hasMore: false,
       nextLink: "",
@@ -322,10 +683,18 @@ async function addAccountsFromInput() {
     }
   }
 
-  accountInput.value = "";
-  closeAccountModal();
-  render();
+  if (addedAccounts.length) {
+    const firstAdded = addedAccounts[0];
+    state.selectedAccountId = firstAdded.id;
+    state.selectedMessageKey = null;
+    saveState();
+  }
 
+  return { addedAccounts, failures };
+}
+
+function showAddAccountsResult(result) {
+  const { addedAccounts, failures } = result;
   const summary = `成功加入 ${addedAccounts.length} 个，失败 ${failures.length} 个`;
   if (!addedAccounts.length) {
     const detail = failures.slice(0, 3).map((item) => `${item.reason}: ${item.line}`).join("\n");
@@ -335,13 +704,63 @@ async function addAccountsFromInput() {
   }
 
   const failureDetail = failures.slice(0, 3).map((item) => `${item.reason}: ${item.line}`).join("\n");
-  const firstAdded = addedAccounts[0];
-  state.selectedAccountId = firstAdded.id;
-  state.selectedMessageKey = null;
   setStatus(`${summary}。点击“获取邮件”读取选中邮箱。${failureDetail ? `\n${failureDetail}` : ""}`, failures.length ? "warning" : "");
   showToast(summary);
-  saveState();
   render();
+}
+
+function parseImportedAccountLines(text) {
+  const raw = String(text || "").trim();
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    const accounts = Array.isArray(parsed) ? parsed : parsed.accounts;
+    if (Array.isArray(accounts)) {
+      return accounts.map((item) => (typeof item === "string" ? item : item?.raw || "")).filter(Boolean);
+    }
+  } catch {
+    // 不是 JSON 时按纯文本处理，一行一个邮箱令牌，便于跨浏览器备份。
+  }
+  return raw.split(/\r?\n/);
+}
+
+async function importAccountsFromFile(file) {
+  if (!file) {
+    return;
+  }
+  try {
+    const text = await file.text();
+    const result = addAccountsFromLines(parseImportedAccountLines(text));
+    render();
+    showAddAccountsResult(result);
+  } catch (error) {
+    setStatusError(error.message, "导入失败");
+  } finally {
+    importAccountsFile.value = "";
+  }
+}
+
+function exportAccounts() {
+  if (!state.accounts.length) {
+    setStatus("当前没有可导出的邮箱令牌。", "warning");
+    showToast("没有可导出的邮箱");
+    return;
+  }
+  const text = state.accounts.map((account) => account.raw).join("\n");
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const date = new Date().toISOString().slice(0, 10);
+  link.href = url;
+  link.download = `outlook-lite-邮箱列表-${date}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setStatus(`已导出 ${state.accounts.length} 个邮箱令牌。`);
+  showToast("邮箱列表已导出");
 }
 
 async function fetchAccount(account, options = {}) {
@@ -355,6 +774,7 @@ async function fetchAccount(account, options = {}) {
   const nextLink = append && account.nextLinkTop === requestedTop ? account.nextLink || "" : "";
   account.status = "loading";
   account.error = "";
+  account.errorDetails = "";
   if (!hadMessages || !append) {
     account.count = 0;
   }
@@ -398,6 +818,9 @@ async function fetchAccount(account, options = {}) {
     source: data.source,
     folder: message.folder || "inbox",
     folderName: message.folder_name || "",
+    detailLoaded: hasFullMessageBody(message),
+    detailLoading: false,
+    detailError: "",
     verificationCode: extractVerificationCode(message),
   }));
   const accountMessageMap = new Map();
@@ -432,13 +855,90 @@ async function refreshAccount(account, options = {}) {
     }
   } catch (error) {
     account.status = "error";
-    account.error = error.message;
+    const { summary, details } = splitErrorMessage(error.message);
+    account.error = summary;
+    account.errorDetails = details;
     if (!options.silent) {
-      setStatus(error.message, "error");
+      setStatusError(error.message);
     }
   } finally {
     saveState();
     render();
+  }
+}
+
+function hasFullMessageBody(message) {
+  return Boolean(message?.body_html || message?.body_text || message?.body);
+}
+
+function shouldLoadMessageDetail(message) {
+  return Boolean(message && !message.detailLoading && !message.detailLoaded && !hasFullMessageBody(message));
+}
+
+async function loadMessageDetail(message) {
+  if (!shouldLoadMessageDetail(message)) {
+    return;
+  }
+
+  const account = state.accounts.find((item) => item.id === message.accountId);
+  if (!account) {
+    return;
+  }
+
+  message.detailLoading = true;
+  message.detailError = "";
+  saveState();
+  renderDetail();
+
+  try {
+    const response = await fetch(`${API_BASE}/api/message-detail`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account: account.raw,
+        message_id: message.id,
+        source: message.source || "",
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(`${data.error || "正文读取失败"}${data.details ? `\n${data.details}` : ""}`);
+    }
+
+    const index = state.messages.findIndex((item) => item.key === message.key);
+    if (index < 0) {
+      return;
+    }
+    const current = state.messages[index];
+    const detailMessage = data.message || {};
+    const merged = {
+      ...current,
+      ...detailMessage,
+      key: current.key,
+      accountId: current.accountId,
+      accountEmail: current.accountEmail,
+      source: current.source || data.source,
+      folder: current.folder || detailMessage.folder || "inbox",
+      folderName: current.folderName || detailMessage.folder_name || "",
+      detailLoaded: true,
+      detailLoading: false,
+      detailError: "",
+    };
+    merged.verificationCode = extractVerificationCode(merged);
+    state.messages[index] = merged;
+    saveState();
+    render();
+  } catch (error) {
+    const index = state.messages.findIndex((item) => item.key === message.key);
+    if (index >= 0) {
+      state.messages[index].detailLoading = false;
+      state.messages[index].detailError = error.message;
+    }
+    saveState();
+    renderDetail();
+    setStatusError(error.message, "正文读取失败");
   }
 }
 
@@ -455,8 +955,55 @@ async function fetchSelectedAccounts() {
   setStatus(`正在读取 ${account.email}...`, "loading");
   await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
   fetchButton.disabled = false;
-  setStatus(account.status === "error" ? account.error : `${account.email} 读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
+  if (account.status === "error") {
+    setStatusError([account.error, account.errorDetails].filter(Boolean).join("\n"));
+  } else {
+    setStatus(`${account.email} 读取完成，共 ${account.count} 封`);
+  }
   saveState();
+}
+
+async function refreshSelectedFolderFromTab(tab) {
+  const nextFilter = tab.dataset.filter || "all";
+  const nextScope = nextFilter === "junk" ? "junk" : "nonjunk";
+  state.filter = nextFilter;
+  state.mailScope = nextScope;
+  folderTabs.forEach((item) => item.classList.toggle("active", item === tab));
+  saveState();
+  render();
+
+  if (nextFilter === "unread") {
+    const messages = getVisibleMessages();
+    state.selectedMessageKey = messages[0]?.key || null;
+    saveState();
+    render();
+    setStatus(`已切换到未读，本地筛选 ${messages.length} 封`);
+    return;
+  }
+
+  const account = state.accounts.find((item) => item.id === state.selectedAccountId);
+  if (!account) {
+    setStatus("请先添加邮箱", "warning");
+    return;
+  }
+  if (account.status === "loading") {
+    return;
+  }
+
+  state.visibleByAccount[account.id] = Number(topSelect.value || 10);
+  const label = nextScope === "junk" ? "垃圾邮件" : "收件箱";
+  setStatus(`正在读取 ${account.email} 的${label}...`, "loading");
+  await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
+  if (account.status === "error") {
+    setStatusError([account.error, account.errorDetails].filter(Boolean).join("\n"));
+  } else {
+    setStatus(`${account.email} ${label}读取完成，共 ${account.count} 封`);
+  }
+
+  const messages = getVisibleMessages();
+  state.selectedMessageKey = messages[0]?.key || null;
+  saveState();
+  render();
 }
 
 function compareMessageTimeDesc(left, right) {
@@ -502,6 +1049,7 @@ function getVisibleMessages() {
   if (state.filter === "unread") {
     messages = messages.filter((message) => !message.is_read);
   }
+  messages = filterMessagesByQuery(messages);
   if (state.selectedAccountId) {
     const visibleCount = state.visibleByAccount[state.selectedAccountId] || 10;
     return messages.slice(0, visibleCount);
@@ -511,14 +1059,14 @@ function getVisibleMessages() {
 
 function getAllFilteredMessagesForSelectedAccount() {
   if (!state.selectedAccountId) {
-    return filterMessagesByScope(state.messages);
+    return filterMessagesByQuery(filterMessagesByScope(state.messages));
   }
   let messages = state.messages.filter((message) => message.accountId === state.selectedAccountId);
   messages = filterMessagesByScope(messages);
   if (state.filter === "unread") {
     messages = messages.filter((message) => !message.is_read);
   }
-  return messages;
+  return filterMessagesByQuery(messages);
 }
 
 function filterMessagesByScope(messages) {
@@ -540,6 +1088,30 @@ function isMessageInActiveScope(message) {
     return isJunkMessage(message);
   }
   return !isJunkMessage(message);
+}
+
+function normalizeSearchText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function filterMessagesByQuery(messages) {
+  const query = normalizeSearchText(state.messageSearch);
+  if (!query) {
+    return messages;
+  }
+  return messages.filter((message) => {
+    const haystack = normalizeSearchText([
+      message.subject,
+      message.from_name,
+      message.from_address,
+      message.accountEmail,
+      message.verificationCode,
+      message.preview,
+      message.body_text,
+      message.body,
+    ].filter(Boolean).join("\n"));
+    return haystack.includes(query);
+  });
 }
 
 function getSelectedMessage() {
@@ -612,7 +1184,7 @@ function renderAccounts() {
       const selected = account.id === state.selectedAccountId ? "selected" : "";
       const statusLabel = getAccountStatusLabel(account);
       return `
-        <button class="account-card ${selected}" type="button" data-account-id="${escapeHtml(account.id)}">
+        <article class="account-card ${selected}" role="button" tabindex="0" data-account-id="${escapeHtml(account.id)}">
           <span class="check-box"></span>
           <span class="account-main">
             <strong>${escapeHtml(account.email)}</strong>
@@ -621,12 +1193,26 @@ function renderAccounts() {
           </span>
           <span class="account-side">
             <span class="account-actions">
-              <span class="mini-action" role="button" tabindex="0" data-account-action="copy-email" title="复制邮箱名">⧉</span>
-              <span class="mini-action key" role="button" tabindex="0" data-account-action="copy-token" title="复制邮箱令牌">⚿</span>
+              <button class="mini-action primary" type="button" data-account-action="copy-email" title="复制邮箱名" aria-label="复制邮箱名">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h10v10H8z"></path><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              </button>
+              <button class="mini-action more" type="button" data-account-menu-toggle aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5h.01"></path><path d="M12 12h.01"></path><path d="M12 19h.01"></path></svg>
+              </button>
+            </span>
+            <span class="account-menu" role="menu">
+              <button type="button" role="menuitem" data-account-action="copy-token">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7a4 4 0 1 0-3.1 3.9L4 18.8V22h3.2l1.1-1.1V18h2.9l1.2-1.2v-2.9l2.7-2.7A4 4 0 0 0 15 7z"></path><path d="M16.5 7.5h.01"></path></svg>
+                <span>复制令牌</span>
+              </button>
+              <button class="danger" type="button" role="menuitem" data-account-action="delete-account">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4h8v2"></path><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v5"></path><path d="M14 11v5"></path></svg>
+                <span>删除邮箱</span>
+              </button>
             </span>
             <span class="account-count">${account.status === "loading" ? "..." : account.count}</span>
           </span>
-        </button>
+        </article>
       `;
     })
     .join("");
@@ -651,7 +1237,7 @@ function renderMessages() {
   const total = allFilteredMessages.length;
   const selectedAccount = state.accounts.find((account) => account.id === state.selectedAccountId);
   mailSummary.innerHTML = selectedAccount
-    ? `<span class="summary-title-row"><span class="summary-title">邮件</span><span class="summary-count">已显示 ${messages.length}/${total} 封</span></span><button class="summary-current-email" type="button" data-copy-current-email="${escapeHtml(selectedAccount.email)}" title="点击复制邮箱"><span>当前邮箱：${escapeHtml(selectedAccount.email)}</span></button>`
+    ? `<span class="summary-title-row"><span class="summary-title">邮件</span><span class="summary-count">已显示 ${messages.length}/${total} 封</span></span><button class="summary-current-email" type="button" data-copy-current-email="${escapeHtml(selectedAccount.email)}" title="点击复制邮箱"><span class="summary-current-label">当前邮箱：</span><span class="summary-current-value">${escapeHtml(selectedAccount.email)}</span><svg class="summary-copy-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h10v10H8z"></path><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></button>`
     : `<span class="summary-title-row"><span class="summary-title">邮件</span><span class="summary-count">${total} 封</span></span><span class="summary-current-email muted"><span>当前邮箱：未选择</span></span>`;
 
   if (selectedAccount?.status === "loading" && !messages.length) {
@@ -675,7 +1261,11 @@ function renderMessages() {
     return;
   }
 
-  const hasMore = Boolean(state.selectedAccountId && selectedAccount?.hasMore);
+  const shouldShowLoadMore = Boolean(
+    state.selectedAccountId &&
+      selectedAccount?.hasMore &&
+      (state.filter !== "junk" || messages.length >= Number(topSelect.value || 10))
+  );
   messageList.innerHTML = messages
     .map((message) => {
       const selected = message.key === state.selectedMessageKey ? "selected" : "";
@@ -707,7 +1297,7 @@ function renderMessages() {
         </article>
       `;
     })
-    .join("") + (hasMore ? `
+    .join("") + (shouldShowLoadMore ? `
       <button class="load-more" type="button" data-load-more>
         加载更多
         <span>点击再读取 10 封</span>
@@ -760,6 +1350,16 @@ function renderDetail() {
 function renderMessageContent(message) {
   if (state.showSource) {
     return `<pre class="detail-content source">${escapeHtml(JSON.stringify(message, null, 2))}</pre>`;
+  }
+
+  if (!hasFullMessageBody(message)) {
+    if (message.detailLoading) {
+      return `<div class="detail-content detail-loading"><div class="loader"></div><strong>正文加载中</strong><span>正在按需读取这封邮件的完整内容...</span></div>`;
+    }
+    if (message.detailError) {
+      return `<div class="detail-content detail-error"><strong>正文读取失败</strong><span>${escapeHtml(message.detailError)}</span></div>`;
+    }
+    return `<div class="detail-content rich-text">${renderMarkdownLite(message.preview || "点击邮件后会按需读取完整正文。")}</div>`;
   }
 
   if (message.body_html) {
@@ -836,6 +1436,8 @@ confirmModal.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeCustomSelects();
+    closeThemeMenu();
+    closeAccountMenus();
   }
   if (event.key === "Escape" && accountModal.classList.contains("open")) {
     closeAccountModal();
@@ -849,14 +1451,33 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("[data-select-wrap]")) {
     closeCustomSelects();
   }
+  if (!event.target.closest("#theme-switcher")) {
+    closeThemeMenu();
+  }
+  if (!event.target.closest(".account-card")) {
+    closeAccountMenus();
+  }
 });
+
+document.addEventListener("pointermove", updatePointerPosition, { passive: true });
 
 clearAccountsButton.addEventListener("click", () => {
   accountInput.value = "";
+  renderAccountInputCheck();
   accountInput.focus();
 });
 
+accountInput.addEventListener("input", renderAccountInputCheck);
+
 accountSearch.addEventListener("input", renderAccounts);
+
+messageSearch?.addEventListener("input", () => {
+  state.messageSearch = messageSearch.value;
+  const messages = getVisibleMessages();
+  state.selectedMessageKey = messages[0]?.key || null;
+  renderMessages();
+  renderDetail();
+});
 
 sortSelect.addEventListener("change", () => {
   state.accountSort = normalizeAccountSort(sortSelect.value);
@@ -867,12 +1488,42 @@ sortSelect.addEventListener("change", () => {
 });
 
 topSelect.addEventListener("change", () => {
+  if (topSelect.value !== "10") {
+    topSelect.value = "10";
+  }
   syncCustomSelect(topSelect);
 });
 
 fetchButton.addEventListener("click", fetchSelectedAccounts);
 
+clearCacheButton?.addEventListener("click", () => {
+  openConfirmModal({
+    title: "清空邮件缓存？",
+    message: "这只会清空当前页面内存里的邮件列表和正文，不会删除本地保存的邮箱令牌。刷新页面本来也不会保留邮件正文。",
+    confirmText: "只清空缓存",
+    onConfirm: clearMessageCache,
+  });
+});
+
+exportAccountsButton?.addEventListener("click", exportAccounts);
+
+importAccountsButton?.addEventListener("click", () => {
+  importAccountsFile?.click();
+});
+
+importAccountsFile?.addEventListener("change", () => {
+  importAccountsFromFile(importAccountsFile.files?.[0]);
+});
+
 accountList.addEventListener("click", async (event) => {
+  const menuToggle = event.target.closest("[data-account-menu-toggle]");
+  if (menuToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleAccountMenu(menuToggle);
+    return;
+  }
+
   const action = event.target.closest("[data-account-action]");
   if (action) {
     event.preventDefault();
@@ -884,10 +1535,22 @@ accountList.addEventListener("click", async (event) => {
     }
     if (action.dataset.accountAction === "copy-email") {
       await copyText(account.email, "已复制邮箱名");
+      closeAccountMenus();
       return;
     }
     if (action.dataset.accountAction === "copy-token") {
       await copyText(account.raw, "已复制邮箱令牌");
+      closeAccountMenus();
+      return;
+    }
+    if (action.dataset.accountAction === "delete-account") {
+      closeAccountMenus();
+      openConfirmModal({
+        title: "删除这个邮箱？",
+        message: `这会删除本机浏览器保存的 ${account.email}、它的邮件缓存和当前选择状态。此操作不会影响 Outlook 邮箱本身。`,
+        confirmText: "确认删除",
+        onConfirm: () => deleteAccount(account.id),
+      });
       return;
     }
   }
@@ -900,25 +1563,30 @@ accountList.addEventListener("click", async (event) => {
   if (!account) {
     return;
   }
+  closeAccountMenus();
   state.selectedAccountId = account.id;
   state.visibleByAccount[account.id] = Number(topSelect.value || 10);
   saveState();
   render();
   setStatus(`正在读取 ${account.email}...`, "loading");
   await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
-  setStatus(account.status === "error" ? account.error : `${account.email} 读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
+  if (account.status === "error") {
+    setStatusError([account.error, account.errorDetails].filter(Boolean).join("\n"));
+  } else {
+    setStatus(`${account.email} 读取完成，共 ${account.count} 封`);
+  }
 });
 
 accountList.addEventListener("keydown", async (event) => {
   if (event.key !== "Enter" && event.key !== " ") {
     return;
   }
-  const action = event.target.closest("[data-account-action]");
-  if (!action) {
+  if (event.target.closest("[data-account-action], [data-account-menu-toggle]")) {
     return;
   }
   event.preventDefault();
-  action.click();
+  const card = event.target.closest(".account-card");
+  card?.click();
 });
 
 messageList.addEventListener("click", async (event) => {
@@ -938,7 +1606,7 @@ messageList.addEventListener("click", async (event) => {
     await refreshAccount(account, { silent: true, top: 10, append: true });
     if (account.status === "error") {
       loadMoreButton.disabled = false;
-      setStatus(account.error, "error");
+      setStatusError([account.error, account.errorDetails].filter(Boolean).join("\n"));
       return;
     }
     const addedCount = Math.max(0, account.count - beforeCount);
@@ -964,6 +1632,7 @@ messageList.addEventListener("click", async (event) => {
   state.selectedMessageKey = item.dataset.messageKey;
   saveState();
   render();
+  await loadMessageDetail(getSelectedMessage());
 });
 
 mailSummary.addEventListener("click", async (event) => {
@@ -983,25 +1652,7 @@ detail.addEventListener("click", async (event) => {
 
 folderTabs.forEach((tab) => {
   tab.addEventListener("click", async () => {
-    state.filter = tab.dataset.filter;
-    state.mailScope = state.filter === "junk" ? "junk" : "nonjunk";
-    folderTabs.forEach((item) => item.classList.toggle("active", item === tab));
-    saveState();
-    render();
-    if (state.filter === "junk") {
-      const account = state.accounts.find((item) => item.id === state.selectedAccountId);
-      const hasJunkMessages = account && state.messages.some((message) => message.accountId === account.id && isJunkMessage(message));
-      if (account && !hasJunkMessages && account.status !== "loading") {
-        state.visibleByAccount[account.id] = Number(topSelect.value || 10);
-        setStatus(`正在读取 ${account.email} 的垃圾邮件...`, "loading");
-        await refreshAccount(account, { silent: true, top: state.visibleByAccount[account.id] });
-        setStatus(account.status === "error" ? account.error : `${account.email} 垃圾邮件读取完成，共 ${account.count} 封`, account.status === "error" ? "error" : "");
-      }
-    }
-    const messages = getVisibleMessages();
-    state.selectedMessageKey = messages[0]?.key || null;
-    saveState();
-    render();
+    await refreshSelectedFolderFromTab(tab);
   });
 });
 
@@ -1011,7 +1662,7 @@ toggleSourceButton.addEventListener("click", () => {
   renderDetail();
 });
 
-trustMailCheckbox.addEventListener("change", () => {
+trustMailCheckbox?.addEventListener("change", () => {
   detail.classList.toggle("trusted", trustMailCheckbox.checked);
   renderDetail();
 });
@@ -1021,10 +1672,25 @@ clearStorageButton.addEventListener("click", () => {
 });
 
 confirmClearButton.addEventListener("click", () => {
-  clearSavedState();
+  const action = pendingConfirmAction || clearSavedState;
   closeConfirmModal();
+  action();
+});
+
+themeToggleButton?.addEventListener("click", toggleThemeMenu);
+
+themeMenu?.addEventListener("click", (event) => {
+  const item = event.target.closest("[data-theme-value]");
+  if (!item) {
+    return;
+  }
+  setTheme(item.dataset.themeValue);
 });
 
 customSelects.forEach(buildCustomSelect);
+buildThemeMenu();
+loadHighlightColor();
+loadTheme();
 loadSavedState();
 render();
+showInitialCacheNotice();

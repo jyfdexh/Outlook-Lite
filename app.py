@@ -46,6 +46,10 @@ IMAP_TOKEN_ATTEMPTS = (
     ("common", "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"),
 )
 IMAP_SERVERS = ("outlook.live.com", "outlook.office365.com")
+IMAP_ATOM_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+IMAP_HEADER_FETCH = "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] RFC822.SIZE)"
+GRAPH_MESSAGE_LIST_SELECT = "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
+GRAPH_MESSAGE_DETAIL_SELECT = f"{GRAPH_MESSAGE_LIST_SELECT},body"
 
 
 class AccountParseError(ValueError):
@@ -135,6 +139,22 @@ def folders_for_scope(scope: str) -> tuple[str, ...]:
     if scope == "nonjunk":
         return ("inbox",)
     return ("inbox", "junk")
+
+
+def quote_imap_mailbox(value: str) -> str:
+    mailbox = str(value or "")
+    escaped = mailbox.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def iter_imap_mailbox_selectors(mailbox: str) -> tuple[str, ...]:
+    mailbox = str(mailbox or "")
+    if not mailbox:
+        return ("",)
+    if IMAP_ATOM_RE.match(mailbox):
+        return (mailbox,)
+    quoted = quote_imap_mailbox(mailbox)
+    return (quoted, mailbox)
 
 
 def is_graph_next_link(value: str) -> bool:
@@ -282,7 +302,7 @@ def read_messages(
         graph_error = f"{exc}; {exc.details}".strip()
 
     try:
-        messages, has_more = read_messages_imap(
+        messages, has_more, imap_server = read_messages_imap(
             account["email"],
             account["client_id"],
             account["refresh_token"],
@@ -291,7 +311,7 @@ def read_messages(
             mail_scope=mail_scope,
         )
         return {
-            "source": "IMAP XOAUTH2",
+            "source": f"IMAP XOAUTH2 {imap_server}",
             "account": account,
             "messages": messages,
             "next_link": "",
@@ -325,7 +345,8 @@ def read_messages_graph(
             folder_id = GRAPH_FOLDER_IDS[folder]
             params: dict[str, Any] = {
                 "$top": top,
-                "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview,body",
+                # 列表页只读取摘要字段，正文改为点开邮件后按需加载，避免一次拖回多封 HTML 正文。
+                "$select": GRAPH_MESSAGE_LIST_SELECT,
                 "$orderby": "receivedDateTime desc",
             }
             if skip:
@@ -359,6 +380,36 @@ def read_graph_next_links(next_link: str, headers: dict[str, str], top: int) -> 
             next_links[folder] = str(data["@odata.nextLink"])
     messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
     return messages[:top], json.dumps(next_links, ensure_ascii=False) if next_links else ""
+
+
+def read_graph_message_detail(client_id: str, refresh_token: str, message_id: str) -> dict[str, Any]:
+    message_id = str(message_id or "").strip()
+    if not message_id:
+        raise OutlookReadError("邮件 ID 不能为空")
+
+    access_token = get_access_token(client_id, refresh_token, GRAPH_TOKEN_ATTEMPTS)
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Prefer": "outlook.body-content-type='html'",
+    }
+    encoded_message_id = parse.quote(message_id, safe="")
+    url = f"https://graph.microsoft.com/v1.0/me/messages/{encoded_message_id}"
+    data = get_json(url, headers=headers, params={"$select": GRAPH_MESSAGE_DETAIL_SELECT})
+    return normalize_graph_message(data)
+
+
+def read_message_detail(account: dict[str, str], message_id: str, source: str = "") -> tuple[dict[str, Any], str]:
+    normalized_source = str(source or "").strip().lower()
+    if normalized_source.startswith("imap") or re.match(r"^(inbox|junk):\d+$", str(message_id or "").strip()):
+        message, imap_server = read_imap_message_detail(
+            account["email"],
+            account["client_id"],
+            account["refresh_token"],
+            message_id,
+        )
+        return message, f"IMAP XOAUTH2 {imap_server}"
+
+    return read_graph_message_detail(account["client_id"], account["refresh_token"], message_id), "Microsoft Graph"
 
 
 def parse_graph_next_links(value: str) -> dict[str, str]:
@@ -417,7 +468,23 @@ def read_messages_imap(
     top: int,
     skip: int = 0,
     mail_scope: str = "all",
-) -> tuple[list[dict[str, Any]], bool]:
+) -> tuple[list[dict[str, Any]], bool, str]:
+    connection = None
+    try:
+        connection, server = open_imap_connection(email_addr, client_id, refresh_token)
+        messages: list[dict[str, Any]] = []
+        has_more = False
+        for folder in folders_for_scope(normalize_mail_scope(mail_scope)):
+            folder_messages, folder_has_more = read_imap_folder(connection, folder, top, skip)
+            messages.extend(folder_messages)
+            has_more = has_more or folder_has_more
+        messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
+        return messages[:top], has_more, server
+    finally:
+        logout_imap(connection)
+
+
+def open_imap_connection(email_addr: str, client_id: str, refresh_token: str) -> tuple[imaplib.IMAP4_SSL, str]:
     access_token = get_access_token(client_id, refresh_token, IMAP_TOKEN_ATTEMPTS)
     errors: list[str] = []
 
@@ -427,24 +494,21 @@ def read_messages_imap(
             connection = imaplib.IMAP4_SSL(server, 993, timeout=30)
             auth_string = f"user={email_addr}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
             connection.authenticate("XOAUTH2", lambda _: auth_string)
-            messages: list[dict[str, Any]] = []
-            has_more = False
-            for folder in folders_for_scope(normalize_mail_scope(mail_scope)):
-                folder_messages, folder_has_more = read_imap_folder(connection, folder, top, skip)
-                messages.extend(folder_messages)
-                has_more = has_more or folder_has_more
-            messages.sort(key=lambda item: item.get("received_at") or "", reverse=True)
-            return messages[:top], has_more
+            return connection, server
         except Exception as exc:
             errors.append(f"{server}: {exc}")
-        finally:
-            if connection is not None:
-                try:
-                    connection.logout()
-                except Exception:
-                    pass
+            logout_imap(connection)
 
     raise OutlookReadError("IMAP 读取失败", details="\n".join(errors))
+
+
+def logout_imap(connection: imaplib.IMAP4_SSL | None) -> None:
+    if connection is None:
+        return
+    try:
+        connection.logout()
+    except Exception:
+        pass
 
 
 def read_imap_folder(
@@ -453,14 +517,7 @@ def read_imap_folder(
     top: int,
     skip: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    mailbox_data: list[bytes] | None = None
-    selected_mailbox = ""
-    for mailbox in IMAP_FOLDER_NAMES[folder]:
-        status, candidate_data = connection.select(mailbox, readonly=True)
-        if status == "OK" and candidate_data and candidate_data[0]:
-            mailbox_data = candidate_data
-            selected_mailbox = mailbox
-            break
+    mailbox_data, selected_mailbox = select_imap_folder(connection, folder)
     if not mailbox_data:
         return [], False
 
@@ -475,16 +532,94 @@ def read_imap_folder(
     messages: list[dict[str, Any]] = []
     for sequence_number in range(end, start - 1, -1):
         message_id = f"{folder}:{sequence_number}"
-        status, fetched = connection.fetch(str(sequence_number), "(RFC822)")
+        status, fetched = connection.fetch(str(sequence_number), IMAP_HEADER_FETCH)
         if status != "OK" or not fetched or not fetched[0]:
             continue
-        raw = fetched[0][1]
-        if isinstance(raw, bytes):
-            message = normalize_imap_message(raw, message_id)
+        raw = extract_fetch_payload(fetched)
+        if raw:
+            message = normalize_imap_header_message(raw, message_id, fetched)
             message["folder"] = folder
             message["folder_name"] = selected_mailbox
             messages.append(message)
     return messages, start > 1
+
+
+def select_imap_folder(connection: imaplib.IMAP4_SSL, folder: str) -> tuple[list[bytes] | None, str]:
+    for mailbox in IMAP_FOLDER_NAMES[folder]:
+        for selector in iter_imap_mailbox_selectors(mailbox):
+            try:
+                status, candidate_data = connection.select(selector, readonly=True)
+            except Exception:
+                continue
+            if status == "OK" and candidate_data and candidate_data[0]:
+                return candidate_data, mailbox
+    return None, ""
+
+
+def extract_fetch_payload(fetched: Any) -> bytes:
+    for item in fetched or []:
+        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
+            return item[1]
+    return b""
+
+
+def extract_fetch_metadata(fetched: Any) -> str:
+    chunks: list[str] = []
+    for item in fetched or []:
+        if isinstance(item, tuple) and item:
+            chunks.append(item[0].decode("utf-8", "replace") if isinstance(item[0], bytes) else str(item[0]))
+        elif isinstance(item, bytes):
+            chunks.append(item.decode("utf-8", "replace"))
+    return " ".join(chunks)
+
+
+def normalize_imap_header_message(raw_headers: bytes, message_id: str, fetched: Any = None) -> dict[str, Any]:
+    message = email.message_from_bytes(raw_headers)
+    sender_name, sender_address = parseaddr(decode_mime(str(message.get("From", ""))))
+    recipient_name, recipient_address = parseaddr(decode_mime(str(message.get("To", ""))))
+    received_at = normalize_email_date(str(message.get("Date", "")))
+    metadata = extract_fetch_metadata(fetched)
+    return {
+        "id": message_id,
+        "subject": decode_mime(str(message.get("Subject", ""))) or "(无主题)",
+        "from_name": sender_name,
+        "from_address": sender_address,
+        "to": [{"name": recipient_name, "address": recipient_address}] if recipient_address else [],
+        "received_at": received_at,
+        "is_read": "\\Seen" in metadata,
+        "has_attachments": False,
+        "preview": "",
+        "body": "",
+        "body_text": "",
+        "body_html": "",
+        "body_type": "text",
+    }
+
+
+def read_imap_message_detail(email_addr: str, client_id: str, refresh_token: str, message_id: str) -> tuple[dict[str, Any], str]:
+    match = re.match(r"^(inbox|junk):(\d+)$", str(message_id or "").strip())
+    if not match:
+        raise OutlookReadError("IMAP 邮件 ID 无效")
+
+    folder, sequence_number = match.groups()
+    connection = None
+    try:
+        connection, server = open_imap_connection(email_addr, client_id, refresh_token)
+        mailbox_data, selected_mailbox = select_imap_folder(connection, folder)
+        if not mailbox_data:
+            raise OutlookReadError("IMAP 邮箱文件夹不存在")
+        status, fetched = connection.fetch(sequence_number, "(RFC822)")
+        if status != "OK":
+            raise OutlookReadError("IMAP 正文读取失败", details=str(fetched))
+        raw = extract_fetch_payload(fetched)
+        if not raw:
+            raise OutlookReadError("IMAP 正文为空")
+        message = normalize_imap_message(raw, message_id)
+        message["folder"] = folder
+        message["folder_name"] = selected_mailbox
+        return message, server
+    finally:
+        logout_imap(connection)
 
 
 def normalize_imap_message(raw: bytes, message_id: str) -> dict[str, Any]:
@@ -613,6 +748,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/messages":
             self.handle_messages()
             return
+        if self.path == "/api/message-detail":
+            self.handle_message_detail()
+            return
         self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_OPTIONS(self) -> None:
@@ -641,6 +779,34 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "messages": result["messages"],
                     "next_link": result.get("next_link", ""),
                     "has_more": bool(result.get("has_more")),
+                }
+            )
+        except AccountParseError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except OutlookReadError as exc:
+            self.send_json(
+                {
+                    "error": str(exc),
+                    "details": exc.details,
+                },
+                status=HTTPStatus.BAD_GATEWAY,
+            )
+        except Exception as exc:
+            self.send_json({"error": "服务内部错误", "details": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_message_detail(self) -> None:
+        try:
+            payload = self.read_json_body()
+            account = parse_outlook_account_line(payload.get("account", ""))
+            message, source = read_message_detail(account, payload.get("message_id", ""), payload.get("source", ""))
+            self.send_json(
+                {
+                    "source": source,
+                    "account": {
+                        "email": account["email"],
+                        "client_id": account["client_id"],
+                    },
+                    "message": message,
                 }
             )
         except AccountParseError as exc:
