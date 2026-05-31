@@ -70,6 +70,69 @@ http://127.0.0.1:8765/api/messages
 
 因此仍需要先启动 `app.py`。
 
+## Ubuntu 一键部署
+
+如果你有 Ubuntu 22 服务器，可以直接用部署脚本安装为 `systemd` 服务，并用 Nginx 反向代理到域名。
+
+推荐先在 Cloudflare 添加 DNS：
+
+```text
+类型：A
+名称：mail
+内容：你的服务器 IP
+代理：开启，橙色云
+```
+
+然后在服务器执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo env DOMAIN=mail.2333330.xyz bash
+```
+
+脚本会完成这些事情：
+
+- 安装 `git`、`nginx`、`python3`。
+- 拉取 GitHub 仓库到 `/opt/outlook-lite`。
+- 创建 `outlooklite` 系统用户。
+- 创建并启动 `outlook-lite.service`。
+- 配置 Nginx，把 `https://mail.2333330.xyz` 转发到本机 `127.0.0.1:8765`。
+- 安装更新命令 `outlook-lite-update`。
+
+脚本默认生成自签源站证书，适合 Cloudflare SSL/TLS 的 `Full` 模式。如果你要使用 `Full strict`，请把证书替换成 Cloudflare Origin Certificate。
+
+部署完成后访问：
+
+```text
+https://mail.2333330.xyz
+```
+
+强烈建议在 Cloudflare Zero Trust Access 里给 `mail.2333330.xyz` 加登录保护，只允许你自己的邮箱访问。
+
+## 服务器更新
+
+本地改完并推送到 GitHub 后，服务器执行：
+
+```bash
+sudo outlook-lite-update
+```
+
+这个命令会自动：
+
+- 从 GitHub 拉取 `main` 分支最新代码。
+- 重启 `outlook-lite.service`。
+
+如果想查看运行状态：
+
+```bash
+sudo systemctl status outlook-lite
+```
+
+如果想看实时日志：
+
+```bash
+sudo journalctl -u outlook-lite -f
+```
+
 ## 使用方式
 
 1. 点击左上角“添加邮箱”。
