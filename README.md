@@ -86,7 +86,23 @@ http://127.0.0.1:8765/api/messages
 然后在服务器执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo env DOMAIN=mail.example.com bash
+curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo bash
+```
+
+脚本会进入部署向导，按提示选择：
+
+- 是否绑定域名。
+- 域名是什么，只填 `mail.example.com` 这种主机名。
+- 是否使用 Cloudflare 代理。
+- GitHub 仓库地址和部署分支。
+- 本机监听地址和端口。
+- 是否使用默认安装目录、运行用户和服务名。
+- 最后确认部署计划。
+
+如果你想跳过交互，也可以通过环境变量预填配置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo env DOMAIN=mail.example.com NONINTERACTIVE=yes bash
 ```
 
 脚本会完成这些事情：
