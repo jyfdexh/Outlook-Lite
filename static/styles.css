@@ -511,7 +511,7 @@ h1,
   height: 22px;
   font-size: 25px;
   line-height: 1;
-  transform: translateY(-1px);
+  transform: translateY(-3px);
 }
 
 .add-account-trigger strong {
