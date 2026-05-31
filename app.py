@@ -758,6 +758,14 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_cors_headers()
         self.end_headers()
 
+    def end_headers(self) -> None:
+        # Cloudflare 和浏览器会积极缓存 CSS/JS。这里统一禁用缓存，
+        # 避免部署后前端样式仍命中旧静态资源。
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def handle_messages(self) -> None:
         try:
             payload = self.read_json_body()
