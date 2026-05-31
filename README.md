@@ -86,7 +86,7 @@ http://127.0.0.1:8765/api/messages
 然后在服务器执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo env DOMAIN=mail.2333330.xyz bash
+curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/install.sh | sudo env DOMAIN=mail.example.com bash
 ```
 
 脚本会完成这些事情：
@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/in
 - 拉取 GitHub 仓库到 `/opt/outlook-lite`。
 - 创建 `outlooklite` 系统用户。
 - 创建并启动 `outlook-lite.service`。
-- 配置 Nginx，把 `https://mail.2333330.xyz` 转发到本机 `127.0.0.1:8765`。
+- 配置 Nginx，把你的域名转发到本机 `127.0.0.1:8765`。
 - 安装更新命令 `outlook-lite-update`。
 
 脚本默认生成自签源站证书，适合 Cloudflare SSL/TLS 的 `Full` 模式。如果你要使用 `Full strict`，请把证书替换成 Cloudflare Origin Certificate。
@@ -103,10 +103,10 @@ curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/in
 部署完成后访问：
 
 ```text
-https://mail.2333330.xyz
+https://mail.example.com
 ```
 
-强烈建议在 Cloudflare Zero Trust Access 里给 `mail.2333330.xyz` 加登录保护，只允许你自己的邮箱访问。
+强烈建议在 Cloudflare Zero Trust Access 里给你的域名加登录保护，只允许你自己的邮箱访问。
 
 ## 服务器更新
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-DOMAIN="${DOMAIN:-mail.2333330.xyz}"
+DOMAIN="${DOMAIN:-}"
 REPO_URL="${REPO_URL:-https://github.com/jyfdexh/Outlook-Lite.git}"
 BRANCH="${BRANCH:-main}"
 APP_DIR="${APP_DIR:-/opt/outlook-lite}"
@@ -24,7 +24,16 @@ fail() {
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    fail "请使用 root 权限运行，例如：sudo env DOMAIN=${DOMAIN} bash deploy/install.sh"
+    fail "请使用 root 权限运行，例如：sudo env DOMAIN=mail.example.com bash deploy/install.sh"
+  fi
+}
+
+validate_config() {
+  if [[ -z "${DOMAIN}" ]]; then
+    fail "请通过 DOMAIN 指定部署域名，例如：sudo env DOMAIN=mail.example.com bash deploy/install.sh"
+  fi
+  if [[ "${DOMAIN}" == *"/"* || "${DOMAIN}" == *":"* ]]; then
+    fail "DOMAIN 只填写域名，不要包含协议或路径，例如：mail.example.com"
   fi
 }
 
@@ -172,6 +181,7 @@ EOF
 
 main() {
   require_root
+  validate_config
   install_packages
   ensure_user
   sync_repository
