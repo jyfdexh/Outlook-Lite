@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal
 
 cd /d "%~dp0"
@@ -32,7 +33,7 @@ echo 正在启动 Outlook Lite...
 echo URL: %URL%
 echo.
 
-start "Outlook Lite 服务" cmd /k "%PYTHON_CMD% app.py --host %HOST% --port %PORT%"
+start "Outlook Lite Server" cmd /k "%PYTHON_CMD% app.py --host %HOST% --port %PORT%"
 timeout /t 2 /nobreak >nul
 start "" "%URL%"
 

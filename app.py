@@ -9,6 +9,8 @@ import re
 import socket
 import ssl
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
@@ -27,6 +29,9 @@ ACCOUNT_SEPARATOR = "----"
 DEFAULT_TOP = 10
 MAX_TOP = 50
 MAX_SKIP = 10000
+MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+TOKEN_CACHE_DEFAULT_TTL_SECONDS = 45 * 60
+TOKEN_CACHE_EXPIRY_SKEW_SECONDS = 5 * 60
 GRAPH_FOLDER_IDS = {
     "inbox": "inbox",
     "junk": "junkemail",
@@ -50,9 +55,19 @@ IMAP_ATOM_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 IMAP_HEADER_FETCH = "(FLAGS BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)] RFC822.SIZE)"
 GRAPH_MESSAGE_LIST_SELECT = "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview"
 GRAPH_MESSAGE_DETAIL_SELECT = f"{GRAPH_MESSAGE_LIST_SELECT},body"
+ACCESS_TOKEN_CACHE: dict[tuple[str, str, tuple[tuple[str, str], ...]], tuple[str, float]] = {}
+ACCESS_TOKEN_CACHE_LOCK = threading.RLock()
 
 
 class AccountParseError(ValueError):
+    pass
+
+
+class BadJsonError(ValueError):
+    pass
+
+
+class RequestBodyTooLarge(ValueError):
     pass
 
 
@@ -242,7 +257,67 @@ def extract_error_message(raw: str) -> str:
     return ""
 
 
+def token_cache_key(
+    client_id: str,
+    refresh_token: str,
+    attempts: tuple[tuple[str, str], ...],
+) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+    return client_id, refresh_token, attempts
+
+
+def get_cached_access_token(
+    client_id: str,
+    refresh_token: str,
+    attempts: tuple[tuple[str, str], ...],
+) -> str:
+    key = token_cache_key(client_id, refresh_token, attempts)
+    now = time.monotonic()
+    with ACCESS_TOKEN_CACHE_LOCK:
+        cached = ACCESS_TOKEN_CACHE.get(key)
+        if not cached:
+            return ""
+        access_token, expires_at = cached
+        if expires_at <= now:
+            ACCESS_TOKEN_CACHE.pop(key, None)
+            return ""
+        return access_token
+
+
+def cache_access_token(
+    client_id: str,
+    refresh_token: str,
+    attempts: tuple[tuple[str, str], ...],
+    access_token: str,
+    expires_in: Any,
+) -> None:
+    try:
+        ttl = int(expires_in)
+    except (TypeError, ValueError):
+        ttl = TOKEN_CACHE_DEFAULT_TTL_SECONDS
+
+    # Microsoft 返回的 expires_in 通常约 3600 秒。提前留出 5 分钟余量，
+    # 避免刚取出的 token 在后续 Graph/IMAP 请求中临界过期。
+    safe_ttl = max(60, min(ttl - TOKEN_CACHE_EXPIRY_SKEW_SECONDS, TOKEN_CACHE_DEFAULT_TTL_SECONDS))
+    key = token_cache_key(client_id, refresh_token, attempts)
+    with ACCESS_TOKEN_CACHE_LOCK:
+        ACCESS_TOKEN_CACHE[key] = (access_token, time.monotonic() + safe_ttl)
+
+
+def clear_cached_access_token(
+    client_id: str,
+    refresh_token: str,
+    attempts: tuple[tuple[str, str], ...],
+) -> None:
+    key = token_cache_key(client_id, refresh_token, attempts)
+    with ACCESS_TOKEN_CACHE_LOCK:
+        ACCESS_TOKEN_CACHE.pop(key, None)
+
+
 def get_access_token(client_id: str, refresh_token: str, attempts: tuple[tuple[str, str], ...]) -> str:
+    cached_token = get_cached_access_token(client_id, refresh_token, attempts)
+    if cached_token:
+        return cached_token
+
     errors: list[str] = []
     for tenant, scope in attempts:
         token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
@@ -262,6 +337,7 @@ def get_access_token(client_id: str, refresh_token: str, attempts: tuple[tuple[s
 
         access_token = str(data.get("access_token") or "")
         if access_token:
+            cache_access_token(client_id, refresh_token, attempts, access_token, data.get("expires_in"))
             return access_token
         errors.append(f"{tenant} / {scope}: access_token 为空")
 
@@ -764,6 +840,24 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")
         self.send_header("Expires", "0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        # 邮件正文需要显示远程图片，所以 img-src 保持开放；脚本、对象和 frame 仍收紧。
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src * data: blob:; "
+            "connect-src 'self'; "
+            "font-src 'self' data:; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'",
+        )
         super().end_headers()
 
     def handle_messages(self) -> None:
@@ -791,6 +885,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
         except AccountParseError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except BadJsonError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RequestBodyTooLarge as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         except OutlookReadError as exc:
             self.send_json(
                 {
@@ -819,6 +917,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             )
         except AccountParseError as exc:
             self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except BadJsonError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RequestBodyTooLarge as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         except OutlookReadError as exc:
             self.send_json(
                 {
@@ -831,11 +933,19 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "服务内部错误", "details": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def read_json_body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError as exc:
+            raise BadJsonError("请求体长度不合法") from exc
+        if length > MAX_JSON_BODY_BYTES:
+            raise RequestBodyTooLarge("请求体过大，请减少一次导入的邮箱数量")
         raw = self.rfile.read(length).decode("utf-8", "replace")
         if not raw:
             return {}
-        return json.loads(raw)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise BadJsonError("请求 JSON 格式不合法") from exc
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

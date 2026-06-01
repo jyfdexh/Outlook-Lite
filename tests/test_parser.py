@@ -1,11 +1,17 @@
 import unittest
+from io import BytesIO
 from email.message import EmailMessage
 from unittest.mock import patch
 
+import app
 from app import (
     AccountParseError,
+    AppHandler,
+    GRAPH_TOKEN_ATTEMPTS,
     IMAP_HEADER_FETCH,
+    MAX_JSON_BODY_BYTES,
     folders_for_scope,
+    get_access_token,
     html_to_text,
     iter_imap_mailbox_selectors,
     is_probable_client_id,
@@ -30,6 +36,10 @@ REFRESH_TOKEN = "0.AXEA_refresh_token_value"
 
 
 class OutlookAccountParserTests(unittest.TestCase):
+    def setUp(self):
+        with app.ACCESS_TOKEN_CACHE_LOCK:
+            app.ACCESS_TOKEN_CACHE.clear()
+
     def test_default_order(self):
         parsed = parse_outlook_account_line(
             f"user@outlook.com----password123----{CLIENT_ID}----{REFRESH_TOKEN}"
@@ -64,6 +74,32 @@ class OutlookAccountParserTests(unittest.TestCase):
     def test_client_id_detection_uses_uuid_shape(self):
         self.assertTrue(is_probable_client_id(CLIENT_ID))
         self.assertFalse(is_probable_client_id(REFRESH_TOKEN))
+
+    def test_access_token_is_cached(self):
+        with patch(
+            "app.post_form_json",
+            return_value={"access_token": "access-token", "expires_in": 3600},
+        ) as post_form_json:
+            first = get_access_token(CLIENT_ID, REFRESH_TOKEN, GRAPH_TOKEN_ATTEMPTS)
+            second = get_access_token(CLIENT_ID, REFRESH_TOKEN, GRAPH_TOKEN_ATTEMPTS)
+
+        self.assertEqual(first, "access-token")
+        self.assertEqual(second, "access-token")
+        post_form_json.assert_called_once()
+
+    def test_expired_access_token_cache_is_refetched(self):
+        key = app.token_cache_key(CLIENT_ID, REFRESH_TOKEN, GRAPH_TOKEN_ATTEMPTS)
+        with app.ACCESS_TOKEN_CACHE_LOCK:
+            app.ACCESS_TOKEN_CACHE[key] = ("expired-token", app.time.monotonic() - 1)
+
+        with patch(
+            "app.post_form_json",
+            return_value={"access_token": "fresh-token", "expires_in": 3600},
+        ) as post_form_json:
+            token = get_access_token(CLIENT_ID, REFRESH_TOKEN, GRAPH_TOKEN_ATTEMPTS)
+
+        self.assertEqual(token, "fresh-token")
+        post_form_json.assert_called_once()
 
     def test_top_is_clamped(self):
         self.assertEqual(normalize_top("0"), 1)
@@ -286,6 +322,54 @@ class OutlookAccountParserTests(unittest.TestCase):
 
     def test_html_to_text_removes_tags_and_scripts(self):
         self.assertEqual(html_to_text("<style>x</style><p>Hello<br>World</p>"), "Hello\nWorld")
+
+    def test_api_rejects_invalid_json_with_security_headers(self):
+        handler = self.make_handler(b"{bad-json", "/api/messages")
+
+        handler.handle_messages()
+
+        self.assertEqual(handler.status_code, 400)
+        self.assertIn("请求 JSON 格式不合法", handler.output_text())
+        self.assertEqual(handler.header_map["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(handler.header_map["X-Frame-Options"], "DENY")
+        self.assertIn("object-src 'none'", handler.header_map["Content-Security-Policy"])
+
+    def test_api_rejects_large_json_body(self):
+        handler = self.make_handler(b"{}", "/api/messages", content_length=MAX_JSON_BODY_BYTES + 1)
+
+        handler.handle_messages()
+
+        self.assertEqual(handler.status_code, 413)
+        self.assertIn("请求体过大", handler.output_text())
+
+    def make_handler(self, body: bytes, path: str, content_length: int | None = None):
+        handler = object.__new__(AppHandler)
+        handler.path = path
+        handler.command = "POST"
+        handler.request_version = "HTTP/1.1"
+        handler.headers = {"Content-Length": str(len(body) if content_length is None else content_length)}
+        handler.rfile = BytesIO(body)
+        handler.wfile = BytesIO()
+        handler.status_code = None
+        handler.header_map = {}
+
+        def send_response(self, code, message=None):
+            self.status_code = code
+            self._headers_buffer = [f"HTTP/1.1 {code} test\r\n".encode("latin-1")]
+
+        def send_header(self, keyword, value):
+            self.header_map[keyword] = str(value)
+            self._headers_buffer.append(f"{keyword}: {value}\r\n".encode("latin-1"))
+
+        def output_text(self):
+            raw = self.wfile.getvalue()
+            _, _, body = raw.partition(b"\r\n\r\n")
+            return body.decode("utf-8", "replace")
+
+        handler.send_response = send_response.__get__(handler, AppHandler)
+        handler.send_header = send_header.__get__(handler, AppHandler)
+        handler.output_text = output_text.__get__(handler, AppHandler)
+        return handler
 
 
 if __name__ == "__main__":
