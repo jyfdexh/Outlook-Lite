@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Outlook 邮件工作台</title>
     <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20260601-3" />
-    <link rel="stylesheet" href="styles.css?v=20260531-2" />
+    <link rel="stylesheet" href="styles.css?v=20260602-4" />
   </head>
   <body>
     <main class="mail-app">
@@ -83,6 +83,11 @@
             </button>
             <div id="theme-menu" class="theme-menu" role="menu" aria-label="主题选择"></div>
           </div>
+          <label class="background-opacity-control" for="background-opacity-range" title="调整邮箱主页背景透出强度">
+            <span>透明度</span>
+            <input id="background-opacity-range" type="range" min="60" max="100" step="5" />
+            <output id="background-opacity-value">75%</output>
+          </label>
           <div class="data-actions toolbar-data-actions" aria-label="本地邮箱数据">
             <button id="import-accounts-button" class="tool-action" type="button" aria-label="导入本地邮箱令牌列表文件" data-tooltip="导入本地邮箱令牌列表文件">导入</button>
             <button id="export-accounts-button" class="tool-action" type="button" aria-label="导出当前邮箱令牌列表到文件" data-tooltip="导出当前邮箱令牌列表到文件">导出</button>
@@ -149,7 +154,24 @@
       </section>
     </div>
 
+    <aside id="admin-entry" class="admin-entry" aria-label="管理员入口">
+      <button id="admin-entry-button" class="admin-entry-button" type="button" title="管理员设置" aria-label="管理员设置" aria-expanded="false" aria-controls="admin-login-popover">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z"></path>
+          <path d="M19.4 13.4c.06-.46.06-.88 0-1.34l2-1.56-2-3.46-2.42.98a8 8 0 0 0-1.16-.66L15.46 4h-4l-.36 3.36c-.4.18-.78.4-1.16.66l-2.42-.98-2 3.46 2 1.56a7 7 0 0 0 0 1.34l-2 1.56 2 3.46 2.42-.98c.36.26.74.48 1.16.66l.36 3.36h4l.36-3.36c.4-.18.78-.4 1.16-.66l2.42.98 2-3.46-2-1.56Z"></path>
+        </svg>
+      </button>
+      <form id="admin-login-popover" class="admin-login-popover" hidden>
+        <label for="admin-entry-password">管理员密码</label>
+        <div class="admin-entry-row">
+          <input id="admin-entry-password" type="password" autocomplete="current-password" placeholder="输入密码" />
+          <button type="submit">进入</button>
+        </div>
+        <p id="admin-entry-status" aria-live="polite"></p>
+      </form>
+    </aside>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="app.js?v=20260531-2"></script>
+    <script src="app.js?v=20260602-4"></script>
   </body>
 </html>

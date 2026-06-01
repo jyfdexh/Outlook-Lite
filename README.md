@@ -3,7 +3,7 @@
 Outlook Lite 是一个轻量级 Outlook 邮件读取工具。它专注做一件事：用 `client_id + refresh_token` 读取 Outlook 邮件，自动识别令牌顺序，并在界面里高亮可能的验证码。
 
 项目不使用数据库，不需要第三方 Python 依赖，直接用 Python 标准库启动本地 Web 服务。
-###                                                                     sudo outlook-lite-update
+
 ## 功能
 
 - 支持两种 Outlook 令牌格式自动识别：
@@ -26,6 +26,7 @@ Outlook Lite 是一个轻量级 Outlook 邮件读取工具。它专注做一件�
 - 支持只清空当前页面邮件缓存，不删除邮箱令牌。
 - 支持清空本地邮箱令牌，带确认弹窗防误触。
 - 支持多主题切换，默认主题为“亲生物设计”。
+- 支持文件版管理员统计后台，不需要数据库。
 
 ## 运行环境
 
@@ -96,6 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/in
 - 是否使用 Cloudflare 代理。
 - GitHub 仓库地址和部署分支。
 - 本机监听地址和端口。
+- 管理员后台密码；留空会自动生成随机密码。
 - 是否使用默认安装目录、运行用户和服务名。
 - 最后确认部署计划。
 
@@ -112,6 +114,8 @@ curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/in
 - 创建 `outlooklite` 系统用户。
 - 创建并启动 `outlook-lite.service`。
 - 配置 Nginx，把你的域名转发到本机 `127.0.0.1:8765`。
+- 创建 `/opt/outlook-lite/data` 文件版统计目录。
+- 写入管理员密码文件和管理员会话密钥文件。
 - 安装更新命令 `outlook-lite-update`。
 
 脚本默认生成自签源站证书，适合 Cloudflare SSL/TLS 的 `Full` 模式。如果你要使用 `Full strict`，请把证书替换成 Cloudflare Origin Certificate。
@@ -120,6 +124,12 @@ curl -fsSL https://raw.githubusercontent.com/jyfdexh/Outlook-Lite/main/deploy/in
 
 ```text
 https://mail.example.com
+```
+
+管理员后台：
+
+```text
+https://mail.example.com/admin
 ```
 
 强烈建议在 Cloudflare Zero Trust Access 里给你的域名加登录保护，只允许你自己的邮箱访问。
@@ -135,6 +145,8 @@ sudo outlook-lite-update
 这个命令会自动：
 
 - 从 GitHub 拉取 `main` 分支最新代码。
+- 保留 `/opt/outlook-lite/data` 里的统计文件和管理员配置。
+- 如果旧版本没有管理员配置，会自动生成管理员密码并在终端输出一次。
 - 重启 `outlook-lite.service`。
 
 如果想查看运行状态：
@@ -179,6 +191,58 @@ Outlook Lite 不使用数据库，不在服务端保存账号。为了刷新页�
 
 由于账号行包含 `refresh_token`，请只在可信设备上使用。如果不再需要，点击页面右上角“清空本地邮箱”删除本地保存的令牌。
 
+## 文件版管理员统计
+
+部署到服务器后可打开：
+
+```text
+/admin
+```
+
+管理员后台默认使用文件保存统计，不需要安装数据库。默认数据目录：
+
+```text
+/opt/outlook-lite/data
+```
+
+主要文件：
+
+```text
+data/analytics.json              # 聚合统计
+data/events.log                  # 事件流水，一行一个 JSON
+data/admin-password              # 管理员密码文件
+data/admin-session-secret        # 管理员会话签名密钥
+```
+
+统计内容包括：
+
+- 当前在线人数。
+- 累计访问次数和独立访客数。
+- 累计导入邮箱数量。
+- 读取成功、读取失败、累计读取邮件数量。
+- 导入域名分布和读取域名分布。
+- Graph / IMAP 读取来源分布。
+- 简化后的失败原因。
+- 最近事件。
+
+隐私边界：
+
+- 不保存 `refresh_token`。
+- 不保存 `client_id`。
+- 不保存密码字段。
+- 不保存完整邮箱令牌。
+- 不保存邮件标题、正文、验证码。
+- 不保存完整 IP，只用匿名访客 Cookie 统计访客和在线人数。
+
+如果要手动修改管理员密码：
+
+```bash
+sudo sh -c 'printf "%s" "你的新密码" > /opt/outlook-lite/data/admin-password'
+sudo chown outlooklite:outlooklite /opt/outlook-lite/data/admin-password
+sudo chmod 600 /opt/outlook-lite/data/admin-password
+sudo systemctl restart outlook-lite
+```
+
 ## 邮件读取方式
 
 读取流程：
@@ -222,8 +286,13 @@ node --check static/app.js
 ├── start-outlook-lite.bat    # Windows 一键启动脚本
 ├── static/
 │   ├── index.html            # 前端页面
+│   ├── admin.html            # 文件版管理员统计后台
 │   ├── app.js                # 前端交互、本地邮箱列表、验证码提取
+│   ├── admin.js              # 管理员统计后台交互
 │   └── styles.css            # 页面样式和主题
+├── deploy/
+│   ├── install.sh            # Ubuntu 交互式一键部署
+│   └── update.sh             # 服务器同步 GitHub 更新
 └── tests/
     └── test_parser.py        # 解析、Graph、IMAP 和正文处理测试
 ```

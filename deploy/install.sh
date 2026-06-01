@@ -15,6 +15,7 @@ APP_PORT_INPUT="${APP_PORT-}"
 SERVICE_NAME_INPUT="${SERVICE_NAME-}"
 SSL_DIR_INPUT="${SSL_DIR-}"
 USE_DEFAULT_PATHS_INPUT="${USE_DEFAULT_PATHS-}"
+ADMIN_PASSWORD_INPUT="${ADMIN_PASSWORD-}"
 
 DOMAIN=""
 BIND_DOMAIN=""
@@ -32,6 +33,7 @@ NGINX_SITE=""
 NGINX_ENABLED=""
 ENABLE_HTTPS="no"
 HAS_TTY="no"
+ADMIN_PASSWORD=""
 
 DEFAULT_REPO_URL="https://github.com/jyfdexh/Outlook-Lite.git"
 DEFAULT_BRANCH="main"
@@ -184,6 +186,7 @@ configure_wizard() {
   BRANCH="$(ask_text "${BRANCH_INPUT}" "部署分支" "${DEFAULT_BRANCH}" "yes")"
   APP_HOST="$(ask_text "${APP_HOST_INPUT}" "本机监听地址" "${DEFAULT_APP_HOST}" "yes")"
   APP_PORT="$(ask_text "${APP_PORT_INPUT}" "本机服务端口" "${DEFAULT_APP_PORT}" "yes")"
+  ADMIN_PASSWORD="$(ask_text "${ADMIN_PASSWORD_INPUT}" "管理员后台密码，留空会自动生成随机密码" "" "no")"
 
   local use_default_paths
   use_default_paths="$(ask_yes_no "${USE_DEFAULT_PATHS_INPUT}" "是否使用默认安装路径和服务名？" "yes")"
@@ -281,6 +284,7 @@ print_plan() {
 - 本机服务：${APP_HOST}:${APP_PORT}
 - systemd 服务：${SERVICE_NAME}
 - Nginx 配置：${NGINX_SITE}
+- 管理员统计：文件版，数据目录 ${APP_DIR}/data
 
 EOF
 }
@@ -320,6 +324,34 @@ sync_repository() {
   chmod +x "${APP_DIR}/deploy/update.sh"
 }
 
+generate_secret() {
+  openssl rand -base64 32 | tr -d '\n'
+}
+
+prepare_admin_data() {
+  log "准备文件版统计和管理员配置"
+  local data_dir="${APP_DIR}/data"
+  local password_file="${data_dir}/admin-password"
+  local session_secret_file="${data_dir}/admin-session-secret"
+  mkdir -p "${data_dir}"
+
+  if [[ -z "${ADMIN_PASSWORD}" && -f "${password_file}" ]]; then
+    ADMIN_PASSWORD="$(cat "${password_file}")"
+  fi
+  if [[ -z "${ADMIN_PASSWORD}" ]]; then
+    ADMIN_PASSWORD="$(generate_secret)"
+  fi
+
+  printf '%s' "${ADMIN_PASSWORD}" >"${password_file}"
+  if [[ ! -f "${session_secret_file}" ]]; then
+    generate_secret >"${session_secret_file}"
+  fi
+
+  chown -R "${APP_USER}:${APP_USER}" "${data_dir}"
+  chmod 700 "${data_dir}"
+  chmod 600 "${password_file}" "${session_secret_file}"
+}
+
 write_systemd_service() {
   log "写入 systemd 服务"
   cat >"/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
@@ -336,6 +368,9 @@ ExecStart=/usr/bin/python3 ${APP_DIR}/app.py --host ${APP_HOST} --port ${APP_POR
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
+Environment=OUTLOOK_LITE_DATA_DIR=${APP_DIR}/data
+Environment=ADMIN_PASSWORD_FILE=${APP_DIR}/data/admin-password
+Environment=ADMIN_SESSION_SECRET_FILE=${APP_DIR}/data/admin-session-secret
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -479,6 +514,10 @@ sudo systemctl status ${SERVICE_NAME}
 
 查看服务日志：
 sudo journalctl -u ${SERVICE_NAME} -f
+
+管理员后台：
+访问 /admin，管理员密码如下，请保存到你的密码管理器：
+${ADMIN_PASSWORD}
 EOF
 }
 
@@ -490,6 +529,7 @@ main() {
   install_packages
   ensure_user
   sync_repository
+  prepare_admin_data
   write_systemd_service
   write_update_command
   ensure_self_signed_cert

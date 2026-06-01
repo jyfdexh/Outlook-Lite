@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import email
+import hashlib
+import hmac
 import html
 import imaplib
 import json
+import os
 import re
+import secrets
 import socket
 import ssl
 import sys
@@ -16,6 +20,7 @@ from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime, parseaddr
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -24,6 +29,35 @@ from urllib import error, parse, request
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+DATA_DIR = Path(os.environ.get("OUTLOOK_LITE_DATA_DIR") or ROOT / "data")
+ANALYTICS_FILE = DATA_DIR / "analytics.json"
+EVENTS_LOG_FILE = DATA_DIR / "events.log"
+
+
+def read_secret_env(name: str) -> str:
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    file_path = os.environ.get(f"{name}_FILE", "")
+    default_secret_files = {
+        "ADMIN_PASSWORD": "admin-password",
+        "ADMIN_SESSION_SECRET": "admin-session-secret",
+    }
+    candidate_paths = []
+    if file_path:
+        candidate_paths.append(Path(file_path))
+    if name in default_secret_files:
+        # 管理员密码属于本机配置，默认从 data/ 读取，避免把密码硬编码进源码或提交到仓库。
+        candidate_paths.append(DATA_DIR / default_secret_files[name])
+    for candidate_path in candidate_paths:
+        try:
+            secret = candidate_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if secret:
+            return secret
+    return ""
+
 
 ACCOUNT_SEPARATOR = "----"
 DEFAULT_TOP = 10
@@ -32,6 +66,15 @@ MAX_SKIP = 10000
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
 TOKEN_CACHE_DEFAULT_TTL_SECONDS = 45 * 60
 TOKEN_CACHE_EXPIRY_SKEW_SECONDS = 5 * 60
+ANALYTICS_ENABLED = os.environ.get("ANALYTICS_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+ANALYTICS_ONLINE_SECONDS = 90
+ANALYTICS_ACTIVE_KEEP_SECONDS = 24 * 60 * 60
+ANALYTICS_RECENT_EVENTS_LIMIT = 100
+ADMIN_PASSWORD = read_secret_env("ADMIN_PASSWORD")
+ADMIN_SESSION_SECRET = read_secret_env("ADMIN_SESSION_SECRET") or ADMIN_PASSWORD
+ADMIN_SESSION_TTL_SECONDS = 12 * 60 * 60
+VISITOR_COOKIE_NAME = "ol_vid"
+ADMIN_COOKIE_NAME = "ol_admin"
 GRAPH_FOLDER_IDS = {
     "inbox": "inbox",
     "junk": "junkemail",
@@ -57,6 +100,7 @@ GRAPH_MESSAGE_LIST_SELECT = "id,subject,from,toRecipients,receivedDateTime,isRea
 GRAPH_MESSAGE_DETAIL_SELECT = f"{GRAPH_MESSAGE_LIST_SELECT},body"
 ACCESS_TOKEN_CACHE: dict[tuple[str, str, tuple[tuple[str, str], ...]], tuple[str, float]] = {}
 ACCESS_TOKEN_CACHE_LOCK = threading.RLock()
+ANALYTICS_LOCK = threading.RLock()
 
 
 class AccountParseError(ValueError):
@@ -806,6 +850,332 @@ def decode_part_payload(part: email.message.Message) -> str:
     return payload.decode(charset, "replace")
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def default_analytics_state() -> dict[str, Any]:
+    current = now_iso()
+    return {
+        "version": 1,
+        "created_at": current,
+        "updated_at": current,
+        "counters": {
+            "visit_total": 0,
+            "visitor_total": 0,
+            "heartbeat_total": 0,
+            "import_total": 0,
+            "fetch_total": 0,
+            "fetch_success": 0,
+            "fetch_failed": 0,
+            "message_total": 0,
+        },
+        "visitors": {},
+        "active_visitors": {},
+        "import_domains": {},
+        "fetch_domains": {},
+        "sources": {},
+        "failure_reasons": {},
+        "recent_events": [],
+    }
+
+
+def ensure_analytics_shape(data: dict[str, Any]) -> dict[str, Any]:
+    base = default_analytics_state()
+    for key, value in base.items():
+        data.setdefault(key, value)
+    for key, value in base["counters"].items():
+        data["counters"].setdefault(key, value)
+    for key in ("visitors", "active_visitors", "import_domains", "fetch_domains", "sources", "failure_reasons"):
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+    if not isinstance(data.get("recent_events"), list):
+        data["recent_events"] = []
+    return data
+
+
+def load_analytics_state_unlocked() -> dict[str, Any]:
+    if not ANALYTICS_FILE.exists():
+        return default_analytics_state()
+    try:
+        data = json.loads(ANALYTICS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return default_analytics_state()
+        return ensure_analytics_shape(data)
+    except (OSError, json.JSONDecodeError):
+        return default_analytics_state()
+
+
+def save_analytics_state_unlocked(data: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    data["updated_at"] = now_iso()
+    tmp_path = ANALYTICS_FILE.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n")
+    tmp_path.replace(ANALYTICS_FILE)
+
+
+def analytics_bump(mapping: dict[str, Any], key: str, amount: int = 1) -> None:
+    if not key:
+        return
+    mapping[key] = int(mapping.get(key) or 0) + max(0, int(amount or 0))
+
+
+def analytics_public_snapshot(data: dict[str, Any]) -> dict[str, Any]:
+    now = time.time()
+    active_visitors = {
+        visitor: seen_at
+        for visitor, seen_at in data.get("active_visitors", {}).items()
+        if now - float(seen_at or 0) <= ANALYTICS_ONLINE_SECONDS
+    }
+    data["active_visitors"] = active_visitors
+    counters = data.get("counters", {})
+    visitor_total = len(data.get("visitors", {}))
+    counters["visitor_total"] = visitor_total
+    return {
+        "enabled": ANALYTICS_ENABLED,
+        "online_count": len(active_visitors),
+        "visit_total": int(counters.get("visit_total") or 0),
+        "visitor_total": visitor_total,
+        "import_total": int(counters.get("import_total") or 0),
+        "fetch_total": int(counters.get("fetch_total") or 0),
+        "fetch_success": int(counters.get("fetch_success") or 0),
+        "fetch_failed": int(counters.get("fetch_failed") or 0),
+        "message_total": int(counters.get("message_total") or 0),
+        "updated_at": data.get("updated_at", ""),
+    }
+
+
+def public_analytics_stats() -> dict[str, Any]:
+    if not ANALYTICS_ENABLED:
+        return analytics_public_snapshot(default_analytics_state())
+    with ANALYTICS_LOCK:
+        data = load_analytics_state_unlocked()
+        snapshot = analytics_public_snapshot(data)
+        save_analytics_state_unlocked(data)
+        return snapshot
+
+
+def admin_analytics_stats() -> dict[str, Any]:
+    if not ANALYTICS_ENABLED:
+        return {"public": public_analytics_stats(), "recent_events": []}
+    with ANALYTICS_LOCK:
+        data = load_analytics_state_unlocked()
+        public = analytics_public_snapshot(data)
+        save_analytics_state_unlocked(data)
+        return {
+            "public": public,
+            "counters": data.get("counters", {}),
+            "import_domains": sorted_counts(data.get("import_domains", {})),
+            "fetch_domains": sorted_counts(data.get("fetch_domains", {})),
+            "sources": sorted_counts(data.get("sources", {})),
+            "failure_reasons": sorted_counts(data.get("failure_reasons", {})),
+            "recent_events": list(data.get("recent_events", []))[-ANALYTICS_RECENT_EVENTS_LIMIT:][::-1],
+            "created_at": data.get("created_at", ""),
+            "updated_at": data.get("updated_at", ""),
+        }
+
+
+def sorted_counts(mapping: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {"name": key, "count": int(value or 0)}
+        for key, value in sorted(mapping.items(), key=lambda item: int(item[1] or 0), reverse=True)
+    ]
+
+
+def reset_analytics_state() -> dict[str, Any]:
+    with ANALYTICS_LOCK:
+        data = default_analytics_state()
+        save_analytics_state_unlocked(data)
+        if EVENTS_LOG_FILE.exists():
+            EVENTS_LOG_FILE.unlink()
+        return analytics_public_snapshot(data)
+
+
+def normalize_domain(value: Any) -> str:
+    domain = str(value or "").strip().lower()
+    if "@" in domain:
+        domain = domain.rsplit("@", 1)[-1]
+    if not re.fullmatch(r"[a-z0-9.-]{2,255}", domain):
+        return "unknown"
+    return domain
+
+
+def mask_email(value: Any) -> str:
+    email_addr = str(value or "").strip()
+    if "@" not in email_addr:
+        return ""
+    local, domain = email_addr.rsplit("@", 1)
+    if len(local) <= 4:
+        masked_local = f"{local[:1]}***"
+    else:
+        masked_local = f"{local[:2]}***{local[-2:]}"
+    return f"{masked_local}@{normalize_domain(domain)}"
+
+
+def normalize_event_reason(value: Any) -> str:
+    reason = normalize_whitespace(str(value or ""))
+    if not reason:
+        return "未知错误"
+    reason = re.sub(r"M\.[A-Za-z0-9_.$!*\\-]+", "M.***", reason)
+    reason = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+", "***@***", reason)
+    return reason[:120]
+
+
+def visitor_hash(visitor_id: str) -> str:
+    return hashlib.sha256(str(visitor_id or "").encode("utf-8")).hexdigest()
+
+
+def new_visitor_id() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def parse_cookie_header(header: str) -> SimpleCookie:
+    cookie = SimpleCookie()
+    if header:
+        cookie.load(header)
+    return cookie
+
+
+def get_cookie_value(header: str, name: str) -> str:
+    cookie = parse_cookie_header(header)
+    morsel = cookie.get(name)
+    return morsel.value if morsel else ""
+
+
+def build_cookie_header(name: str, value: str, *, max_age: int, http_only: bool = True) -> str:
+    parts = [f"{name}={value}", "Path=/", f"Max-Age={max_age}", "SameSite=Lax"]
+    if http_only:
+        parts.append("HttpOnly")
+    return "; ".join(parts)
+
+
+def make_admin_session() -> str:
+    expires_at = int(time.time()) + ADMIN_SESSION_TTL_SECONDS
+    nonce = secrets.token_urlsafe(16)
+    body = f"{expires_at}.{nonce}"
+    signature = hmac.new(ADMIN_SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{body}.{signature}"
+
+
+def is_admin_session_valid(token: str) -> bool:
+    if not ADMIN_PASSWORD or not ADMIN_SESSION_SECRET or not token:
+        return False
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    expires_at, nonce, signature = parts
+    if not expires_at.isdigit() or int(expires_at) < int(time.time()):
+        return False
+    body = f"{expires_at}.{nonce}"
+    expected = hmac.new(ADMIN_SESSION_SECRET.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def event_domains_from_payload(payload: dict[str, Any]) -> dict[str, int]:
+    domains: dict[str, int] = {}
+    raw_domains = payload.get("domains")
+    if isinstance(raw_domains, dict):
+        for domain, count in raw_domains.items():
+            try:
+                amount = int(count)
+            except (TypeError, ValueError):
+                amount = 0
+            if amount > 0:
+                domains[normalize_domain(domain)] = domains.get(normalize_domain(domain), 0) + min(amount, 10000)
+    else:
+        domain = normalize_domain(payload.get("domain") or payload.get("email"))
+        if domain:
+            domains[domain] = 1
+    return domains
+
+
+def append_analytics_event_unlocked(event: dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with EVENTS_LOG_FILE.open("a", encoding="utf-8", newline="\n") as log_file:
+        log_file.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def record_analytics_visit(visitor_id: str, kind: str = "visit") -> dict[str, Any]:
+    if not ANALYTICS_ENABLED:
+        return public_analytics_stats()
+    visitor_key = visitor_hash(visitor_id)
+    now = time.time()
+    with ANALYTICS_LOCK:
+        data = load_analytics_state_unlocked()
+        counters = data["counters"]
+        visitors = data["visitors"]
+        if visitor_key not in visitors:
+            visitors[visitor_key] = {"first_seen": now, "last_seen": now}
+        else:
+            visitors[visitor_key]["last_seen"] = now
+        data["active_visitors"][visitor_key] = now
+        if kind == "visit":
+            counters["visit_total"] = int(counters.get("visit_total") or 0) + 1
+        else:
+            counters["heartbeat_total"] = int(counters.get("heartbeat_total") or 0) + 1
+
+        # 仅保留 24 小时内活跃表，唯一访客表不剪枝，保证累计访客不回退。
+        data["active_visitors"] = {
+            key: seen_at
+            for key, seen_at in data["active_visitors"].items()
+            if now - float(seen_at or 0) <= ANALYTICS_ACTIVE_KEEP_SECONDS
+        }
+        snapshot = analytics_public_snapshot(data)
+        save_analytics_state_unlocked(data)
+        return snapshot
+
+
+def record_analytics_client_event(visitor_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not ANALYTICS_ENABLED:
+        return public_analytics_stats()
+    event_type = str(payload.get("type") or "").strip()
+    if event_type not in {"import", "fetch_success", "fetch_failed"}:
+        return public_analytics_stats()
+
+    visitor_key = visitor_hash(visitor_id)
+    event: dict[str, Any] = {
+        "time": now_iso(),
+        "type": event_type,
+        "visitor": visitor_key[:10],
+    }
+    with ANALYTICS_LOCK:
+        data = load_analytics_state_unlocked()
+        counters = data["counters"]
+        domains = event_domains_from_payload(payload)
+        if event_type == "import":
+            count = max(0, min(int(payload.get("count") or sum(domains.values()) or 0), 10000))
+            counters["import_total"] = int(counters.get("import_total") or 0) + count
+            for domain, amount in domains.items():
+                analytics_bump(data["import_domains"], domain, amount)
+            event.update({"count": count, "domains": domains})
+        elif event_type == "fetch_success":
+            counters["fetch_total"] = int(counters.get("fetch_total") or 0) + 1
+            counters["fetch_success"] = int(counters.get("fetch_success") or 0) + 1
+            message_count = max(0, min(int(payload.get("message_count") or 0), 10000))
+            counters["message_total"] = int(counters.get("message_total") or 0) + message_count
+            source = normalize_whitespace(str(payload.get("source") or "unknown"))[:80] or "unknown"
+            scope = normalize_whitespace(str(payload.get("scope") or "nonjunk"))[:24] or "nonjunk"
+            for domain, amount in domains.items():
+                analytics_bump(data["fetch_domains"], domain, amount)
+            analytics_bump(data["sources"], source, 1)
+            event.update({"domain": next(iter(domains), "unknown"), "message_count": message_count, "source": source, "scope": scope})
+        else:
+            counters["fetch_total"] = int(counters.get("fetch_total") or 0) + 1
+            counters["fetch_failed"] = int(counters.get("fetch_failed") or 0) + 1
+            reason = normalize_event_reason(payload.get("reason"))
+            for domain, amount in domains.items():
+                analytics_bump(data["fetch_domains"], domain, amount)
+            analytics_bump(data["failure_reasons"], reason, 1)
+            event.update({"domain": next(iter(domains), "unknown"), "reason": reason})
+
+        data["recent_events"].append(event)
+        data["recent_events"] = data["recent_events"][-ANALYTICS_RECENT_EVENTS_LIMIT:]
+        append_analytics_event_unlocked(event)
+        snapshot = analytics_public_snapshot(data)
+        save_analytics_state_unlocked(data)
+        return snapshot
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     server_version = "OutlookMailLite/1.0"
 
@@ -816,16 +1186,48 @@ class AppHandler(SimpleHTTPRequestHandler):
         sys.stderr.write("%s - - [%s] %s\n" % (self.address_string(), self.log_date_time_string(), fmt % args))
 
     def do_GET(self) -> None:
-        if self.path == "/":
+        parsed = parse.urlparse(self.path)
+        route = parsed.path
+        if route == "/":
             self.path = "/index.html"
+            return super().do_GET()
+        if route == "/admin":
+            self.path = "/admin.html"
+            return super().do_GET()
+        if route == "/api/analytics/public":
+            self.send_json({"stats": public_analytics_stats()})
+            return
+        if route == "/api/admin/stats":
+            self.handle_admin_stats()
+            return
+        if route == "/api/admin/export":
+            self.handle_admin_export()
+            return
         return super().do_GET()
 
     def do_POST(self) -> None:
-        if self.path == "/api/messages":
+        parsed = parse.urlparse(self.path)
+        route = parsed.path
+        if route == "/api/messages":
             self.handle_messages()
             return
-        if self.path == "/api/message-detail":
+        if route == "/api/message-detail":
             self.handle_message_detail()
+            return
+        if route == "/api/analytics/ping":
+            self.handle_analytics_ping()
+            return
+        if route == "/api/analytics/event":
+            self.handle_analytics_event()
+            return
+        if route == "/api/admin/login":
+            self.handle_admin_login()
+            return
+        if route == "/api/admin/logout":
+            self.handle_admin_logout()
+            return
+        if route == "/api/admin/reset":
+            self.handle_admin_reset()
             return
         self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -932,6 +1334,104 @@ class AppHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.send_json({"error": "服务内部错误", "details": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def visitor_cookie(self) -> tuple[str, str]:
+        visitor_id = get_cookie_value(self.headers.get("Cookie", ""), VISITOR_COOKIE_NAME)
+        if not visitor_id:
+            visitor_id = new_visitor_id()
+        cookie_header = build_cookie_header(
+            VISITOR_COOKIE_NAME,
+            visitor_id,
+            max_age=365 * 24 * 60 * 60,
+            http_only=True,
+        )
+        return visitor_id, cookie_header
+
+    def admin_cookie(self) -> str:
+        return get_cookie_value(self.headers.get("Cookie", ""), ADMIN_COOKIE_NAME)
+
+    def is_admin_authenticated(self) -> bool:
+        return is_admin_session_valid(self.admin_cookie())
+
+    def require_admin(self) -> bool:
+        if not ADMIN_PASSWORD:
+            self.send_json({"error": "管理员后台未启用，请在服务环境变量里配置 ADMIN_PASSWORD"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return False
+        if not self.is_admin_authenticated():
+            self.send_json({"error": "未登录或登录已过期"}, status=HTTPStatus.UNAUTHORIZED)
+            return False
+        return True
+
+    def handle_analytics_ping(self) -> None:
+        try:
+            payload = self.read_json_body()
+            visitor_id, cookie_header = self.visitor_cookie()
+            kind = "heartbeat" if payload.get("kind") == "heartbeat" else "visit"
+            stats = record_analytics_visit(visitor_id, kind)
+            self.send_json({"stats": stats}, extra_headers={"Set-Cookie": cookie_header})
+        except BadJsonError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RequestBodyTooLarge as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        except Exception as exc:
+            self.send_json({"error": "统计写入失败", "details": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_analytics_event(self) -> None:
+        try:
+            payload = self.read_json_body()
+            visitor_id, cookie_header = self.visitor_cookie()
+            stats = record_analytics_client_event(visitor_id, payload)
+            self.send_json({"stats": stats}, extra_headers={"Set-Cookie": cookie_header})
+        except BadJsonError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RequestBodyTooLarge as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        except Exception as exc:
+            self.send_json({"error": "统计写入失败", "details": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def handle_admin_login(self) -> None:
+        try:
+            payload = self.read_json_body()
+            if not ADMIN_PASSWORD:
+                self.send_json({"error": "管理员后台未启用，请在服务环境变量里配置 ADMIN_PASSWORD"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            password = str(payload.get("password") or "")
+            if not hmac.compare_digest(password, ADMIN_PASSWORD):
+                self.send_json({"error": "管理员密码不正确"}, status=HTTPStatus.UNAUTHORIZED)
+                return
+            token = make_admin_session()
+            cookie_header = build_cookie_header(ADMIN_COOKIE_NAME, token, max_age=ADMIN_SESSION_TTL_SECONDS, http_only=True)
+            self.send_json({"ok": True, "stats": admin_analytics_stats()}, extra_headers={"Set-Cookie": cookie_header})
+        except BadJsonError as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+        except RequestBodyTooLarge as exc:
+            self.send_json({"error": str(exc)}, status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
+    def handle_admin_logout(self) -> None:
+        cookie_header = build_cookie_header(ADMIN_COOKIE_NAME, "deleted", max_age=0, http_only=True)
+        self.send_json({"ok": True}, extra_headers={"Set-Cookie": cookie_header})
+
+    def handle_admin_stats(self) -> None:
+        if not self.require_admin():
+            return
+        self.send_json({"stats": admin_analytics_stats()})
+
+    def handle_admin_export(self) -> None:
+        if not self.require_admin():
+            return
+        body = json.dumps(admin_analytics_stats(), ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_cors_headers()
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", "attachment; filename=outlook-lite-analytics.json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_admin_reset(self) -> None:
+        if not self.require_admin():
+            return
+        self.send_json({"ok": True, "stats": reset_analytics_state()})
+
     def read_json_body(self) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -947,12 +1447,19 @@ class AppHandler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             raise BadJsonError("请求 JSON 格式不合法") from exc
 
-    def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(int(status))
         self.send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 

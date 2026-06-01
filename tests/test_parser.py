@@ -1,6 +1,9 @@
 import unittest
+import json
+import tempfile
 from io import BytesIO
 from email.message import EmailMessage
+from pathlib import Path
 from unittest.mock import patch
 
 import app
@@ -341,6 +344,120 @@ class OutlookAccountParserTests(unittest.TestCase):
 
         self.assertEqual(handler.status_code, 413)
         self.assertIn("请求体过大", handler.output_text())
+
+    def test_analytics_visit_tracks_visitors_and_online(self):
+        with self.analytics_tempdir():
+            first = app.record_analytics_visit("visitor-a", "visit")
+            second = app.record_analytics_visit("visitor-a", "heartbeat")
+
+            self.assertEqual(first["visit_total"], 1)
+            self.assertEqual(second["visit_total"], 1)
+            self.assertEqual(second["visitor_total"], 1)
+            self.assertEqual(second["online_count"], 1)
+            saved = json.loads(app.ANALYTICS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(saved["counters"]["heartbeat_total"], 1)
+
+    def test_analytics_import_and_fetch_events_are_aggregated(self):
+        with self.analytics_tempdir():
+            app.record_analytics_visit("visitor-a", "visit")
+            app.record_analytics_client_event(
+                "visitor-a",
+                {
+                    "type": "import",
+                    "count": 3,
+                    "domains": {"outlook.com": 2, "hotmail.com": 1},
+                },
+            )
+            app.record_analytics_client_event(
+                "visitor-a",
+                {
+                    "type": "fetch_success",
+                    "domain": "outlook.com",
+                    "source": "Graph API",
+                    "scope": "nonjunk",
+                    "message_count": 10,
+                },
+            )
+            app.record_analytics_client_event(
+                "visitor-a",
+                {
+                    "type": "fetch_failed",
+                    "domain": "user@hotmail.com",
+                    "reason": "Graph: HTTP 401; token M.secret user@hotmail.com",
+                },
+            )
+
+            stats = app.admin_analytics_stats()
+
+        self.assertEqual(stats["public"]["import_total"], 3)
+        self.assertEqual(stats["public"]["fetch_total"], 2)
+        self.assertEqual(stats["public"]["fetch_success"], 1)
+        self.assertEqual(stats["public"]["fetch_failed"], 1)
+        self.assertEqual(stats["public"]["message_total"], 10)
+        self.assertEqual(stats["import_domains"][0], {"name": "outlook.com", "count": 2})
+        self.assertIn({"name": "Graph API", "count": 1}, stats["sources"])
+        self.assertTrue(stats["failure_reasons"][0]["name"].startswith("Graph: HTTP 401"))
+        self.assertNotIn("user@hotmail.com", stats["failure_reasons"][0]["name"])
+
+    def test_admin_stats_requires_configured_password(self):
+        with self.analytics_tempdir(), patch.object(app, "ADMIN_PASSWORD", ""), patch.object(app, "ADMIN_SESSION_SECRET", ""):
+            handler = self.make_handler(b"", "/api/admin/stats")
+
+            handler.handle_admin_stats()
+
+        self.assertEqual(handler.status_code, 503)
+        self.assertIn("管理员后台未启用", handler.output_text())
+
+    def test_admin_login_sets_cookie(self):
+        with self.analytics_tempdir(), patch.object(app, "ADMIN_PASSWORD", "secret"), patch.object(app, "ADMIN_SESSION_SECRET", "session-secret"):
+            handler = self.make_handler(b'{"password":"secret"}', "/api/admin/login")
+
+            handler.handle_admin_login()
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertIn(app.ADMIN_COOKIE_NAME, handler.header_map["Set-Cookie"])
+        self.assertIn('"ok": true', handler.output_text())
+
+    def test_admin_login_rejects_wrong_password(self):
+        with self.analytics_tempdir(), patch.object(app, "ADMIN_PASSWORD", "secret"), patch.object(app, "ADMIN_SESSION_SECRET", "session-secret"):
+            handler = self.make_handler(b'{"password":"bad"}', "/api/admin/login")
+
+            handler.handle_admin_login()
+
+        self.assertEqual(handler.status_code, 401)
+        self.assertIn("管理员密码不正确", handler.output_text())
+
+    def test_admin_stats_accepts_valid_session_cookie(self):
+        with self.analytics_tempdir(), patch.object(app, "ADMIN_PASSWORD", "secret"), patch.object(app, "ADMIN_SESSION_SECRET", "session-secret"):
+            token = app.make_admin_session()
+            handler = self.make_handler(b"", "/api/admin/stats")
+            handler.headers["Cookie"] = f"{app.ADMIN_COOKIE_NAME}={token}"
+
+            handler.handle_admin_stats()
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertIn("visit_total", handler.output_text())
+
+    def analytics_tempdir(self):
+        class AnalyticsTempDir:
+            def __enter__(inner_self):
+                inner_self.tempdir = tempfile.TemporaryDirectory()
+                inner_self.originals = (
+                    app.DATA_DIR,
+                    app.ANALYTICS_FILE,
+                    app.EVENTS_LOG_FILE,
+                )
+                app.DATA_DIR = Path(inner_self.tempdir.name)
+                app.ANALYTICS_FILE = app.DATA_DIR / "analytics.json"
+                app.EVENTS_LOG_FILE = app.DATA_DIR / "events.log"
+                return inner_self
+
+            def __exit__(inner_self, exc_type, exc, tb):
+                app.DATA_DIR, app.ANALYTICS_FILE, app.EVENTS_LOG_FILE = inner_self.originals
+                inner_self.tempdir.cleanup()
+                return False
+
+        return AnalyticsTempDir()
 
     def make_handler(self, body: bytes, path: str, content_length: int | None = None):
         handler = object.__new__(AppHandler)

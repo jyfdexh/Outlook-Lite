@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="biophilic">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Outlook Lite 管理员统计</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg?v=20260601-3" />
+    <link rel="stylesheet" href="styles.css?v=20260602-4" />
+  </head>
+  <body class="admin-body">
+    <main class="admin-shell">
+      <header class="admin-hero">
+        <div>
+          <div class="admin-eyebrow">Admin Analytics</div>
+          <h1>管理员统计</h1>
+          <p>
+            文件版轻量统计，只记录访问量、在线人数、导入数量、读取成功/失败、域名分布和简化失败原因。
+            不保存 refresh_token、client_id、完整邮箱令牌、邮件标题、正文或验证码。
+          </p>
+        </div>
+        <nav class="admin-actions" aria-label="管理员操作">
+          <a class="admin-link-button" href="/">返回前台</a>
+          <button id="refresh-button" class="admin-button" type="button" hidden>刷新</button>
+          <a id="export-button" class="admin-link-button" href="/api/admin/export" hidden>导出 JSON</a>
+          <button id="reset-button" class="admin-button danger" type="button" hidden>清空统计</button>
+          <button id="logout-button" class="admin-button" type="button" hidden>退出</button>
+        </nav>
+      </header>
+
+      <section id="admin-dashboard" class="admin-dashboard" hidden>
+        <section id="stat-grid" class="admin-stat-grid" aria-label="核心统计"></section>
+        <section class="admin-grid">
+          <article class="admin-panel">
+            <h2>热门导入域名</h2>
+            <div id="import-domains" class="admin-list"></div>
+          </article>
+          <article class="admin-panel">
+            <h2>热门读取域名</h2>
+            <div id="fetch-domains" class="admin-list"></div>
+          </article>
+          <article class="admin-panel">
+            <h2>读取来源</h2>
+            <div id="sources" class="admin-list"></div>
+          </article>
+          <article class="admin-panel">
+            <h2>失败原因</h2>
+            <div id="failure-reasons" class="admin-list"></div>
+          </article>
+          <article class="admin-panel full">
+            <h2>最近事件</h2>
+            <div id="recent-events" class="admin-events"></div>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="admin.js?v=20260602-4"></script>
+  </body>
+</html>

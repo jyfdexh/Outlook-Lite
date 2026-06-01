@@ -14,7 +14,10 @@ const state = {
 const STORAGE_KEY = "outlook-mail-lite-state-v1";
 const THEME_STORAGE_KEY = "outlook-mail-lite-theme";
 const HIGHLIGHT_COLOR_STORAGE_KEY = "outlook-mail-lite-highlight-color";
+const BACKGROUND_OPACITY_STORAGE_KEY = "outlook-mail-lite-background-opacity";
 const DEFAULT_HIGHLIGHT_COLOR = "#111827";
+const DEFAULT_BACKGROUND_OPACITY = 75;
+const MIN_BACKGROUND_OPACITY = 60;
 const THEMES = {
   minimal: "极简主义",
   aurora: "极光玻璃",
@@ -66,6 +69,13 @@ const customSelects = document.querySelectorAll("[data-custom-select]");
 const themeSwitcher = document.querySelector("#theme-switcher");
 const themeToggleButton = document.querySelector("#theme-toggle-button");
 const themeMenu = document.querySelector("#theme-menu");
+const backgroundOpacityRange = document.querySelector("#background-opacity-range");
+const backgroundOpacityValue = document.querySelector("#background-opacity-value");
+const adminEntry = document.querySelector("#admin-entry");
+const adminEntryButton = document.querySelector("#admin-entry-button");
+const adminLoginPopover = document.querySelector("#admin-login-popover");
+const adminEntryPassword = document.querySelector("#admin-entry-password");
+const adminEntryStatus = document.querySelector("#admin-entry-status");
 const API_BASE = window.location.protocol === "file:" ? "http://127.0.0.1:8765" : "";
 const ACCOUNT_SORT_VALUES = new Set(["emailAsc", "emailDesc", "createdDesc", "createdAsc"]);
 const MAIL_SCOPE_LABELS = {
@@ -77,6 +87,10 @@ const pointerState = {
   x: window.innerWidth / 2,
   y: window.innerHeight / 2,
   frame: 0,
+};
+const analyticsState = {
+  available: true,
+  timer: 0,
 };
 
 function normalizeTheme(value) {
@@ -153,6 +167,45 @@ function loadHighlightColor() {
 function setHighlightColor(value) {
   const color = applyHighlightColor(value);
   localStorage.setItem(HIGHLIGHT_COLOR_STORAGE_KEY, color);
+}
+
+function normalizeBackgroundOpacity(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return DEFAULT_BACKGROUND_OPACITY;
+  }
+  return Math.max(MIN_BACKGROUND_OPACITY, Math.min(100, Math.round(number)));
+}
+
+function applyBackgroundOpacity(value) {
+  const opacity = normalizeBackgroundOpacity(value);
+  const ratio = opacity / 100;
+  // 这里的“透明度”按用户感知理解为“背景透出强度”：
+  // 提高数值时同时降低整页遮罩、主面板和卡片的实色占比，确保能真正看到主题背景纹理。
+  const coverAlpha = Math.max(0.04, Math.min(0.58, 0.58 - ratio * 0.5));
+  const panelAlpha = Math.max(0.34, Math.min(0.9, 0.9 - ratio * 0.48));
+  const cardAlpha = Math.max(0.44, Math.min(0.92, 0.92 - ratio * 0.38));
+  document.documentElement.style.setProperty("--bg-opacity", String(ratio));
+  document.documentElement.style.setProperty("--bg-layer-opacity", String(ratio));
+  document.documentElement.style.setProperty("--bg-cover-opacity", coverAlpha.toFixed(2));
+  document.documentElement.style.setProperty("--panel-alpha", `${Math.round(panelAlpha * 100)}%`);
+  document.documentElement.style.setProperty("--card-alpha", `${Math.round(cardAlpha * 100)}%`);
+  if (backgroundOpacityRange) {
+    backgroundOpacityRange.value = String(opacity);
+  }
+  if (backgroundOpacityValue) {
+    backgroundOpacityValue.textContent = `${opacity}%`;
+  }
+  return opacity;
+}
+
+function loadBackgroundOpacity() {
+  return applyBackgroundOpacity(localStorage.getItem(BACKGROUND_OPACITY_STORAGE_KEY));
+}
+
+function setBackgroundOpacity(value) {
+  const opacity = applyBackgroundOpacity(value);
+  localStorage.setItem(BACKGROUND_OPACITY_STORAGE_KEY, String(opacity));
 }
 
 function updatePointerPosition(event) {
@@ -373,6 +426,172 @@ function formatDate(value) {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+function formatCompactNumber(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) {
+    return "0";
+  }
+  return new Intl.NumberFormat("zh-CN", {
+    notation: number >= 10000 ? "compact" : "standard",
+    maximumFractionDigits: 1,
+  }).format(number);
+}
+
+function domainFromEmail(email) {
+  const value = String(email || "").trim().toLowerCase();
+  if (!value.includes("@")) {
+    return "unknown";
+  }
+  return value.split("@").pop() || "unknown";
+}
+
+function countDomainsFromAccounts(accounts) {
+  return accounts.reduce((result, account) => {
+    const domain = domainFromEmail(account.email);
+    result[domain] = (result[domain] || 0) + 1;
+    return result;
+  }, {});
+}
+
+function updateAnalyticsWidget(stats) {
+  // 前台不再展示统计数字，但仍保留这个入口，避免统计接口返回影响主流程。
+  analyticsState.enabled = stats?.enabled !== false;
+}
+
+async function sendAnalyticsPing(kind = "heartbeat") {
+  if (!analyticsState.available) {
+    return;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/analytics/ping`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ kind }),
+    });
+    const data = await response.json();
+    updateAnalyticsWidget(data.stats);
+  } catch {
+    // 统计失败不能影响主流程，保持静默即可。
+  }
+}
+
+async function sendAnalyticsEvent(payload) {
+  if (!analyticsState.available) {
+    return;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/api/analytics/event`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    updateAnalyticsWidget(data.stats);
+  } catch {
+    // 统计接口只是辅助观察，不应该打断导入或读取邮件。
+  }
+}
+
+function startAnalytics() {
+  if (!analyticsState.available) {
+    return;
+  }
+  sendAnalyticsPing("visit");
+  window.clearInterval(analyticsState.timer);
+  analyticsState.timer = window.setInterval(() => {
+    if (!document.hidden) {
+      sendAnalyticsPing("heartbeat");
+    }
+  }, 60 * 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      sendAnalyticsPing("heartbeat");
+    }
+  });
+}
+
+function setAdminEntryStatus(message, type = "") {
+  if (!adminEntryStatus) {
+    return;
+  }
+  adminEntryStatus.textContent = message || "";
+  adminEntryStatus.className = type;
+}
+
+function openAdminPopover() {
+  if (!adminLoginPopover) {
+    return;
+  }
+  adminLoginPopover.hidden = false;
+  adminEntry?.classList.add("open");
+  adminEntryButton?.setAttribute("aria-expanded", "true");
+  setAdminEntryStatus("");
+  window.setTimeout(() => adminEntryPassword?.focus(), 40);
+}
+
+function closeAdminPopover() {
+  if (!adminLoginPopover) {
+    return;
+  }
+  adminLoginPopover.hidden = true;
+  adminEntry?.classList.remove("open");
+  adminEntryButton?.setAttribute("aria-expanded", "false");
+  setAdminEntryStatus("");
+}
+
+function toggleAdminPopover() {
+  if (!adminLoginPopover || adminLoginPopover.hidden) {
+    openAdminPopover();
+  } else {
+    closeAdminPopover();
+  }
+}
+
+function openAdminPopoverFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("admin") !== "login") {
+    return;
+  }
+  openAdminPopover();
+  params.delete("admin");
+  const nextQuery = params.toString();
+  const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+  window.history.replaceState({}, "", nextUrl);
+}
+
+async function loginAdminFromPopover(event) {
+  event.preventDefault();
+  const password = adminEntryPassword?.value || "";
+  if (!password) {
+    setAdminEntryStatus("请输入密码", "error");
+    adminEntryPassword?.focus();
+    return;
+  }
+  setAdminEntryStatus("验证中...");
+  try {
+    const response = await fetch(`${API_BASE}/api/admin/login`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "管理员密码不正确");
+    }
+    adminEntryPassword.value = "";
+    setAdminEntryStatus("验证通过，正在进入...");
+    window.location.href = `${API_BASE}/admin`;
+  } catch (error) {
+    setAdminEntryStatus(error.message || "验证失败", "error");
+  }
 }
 
 function getEmailFromLine(line) {
@@ -696,6 +915,13 @@ function addAccountsFromLines(rawLines) {
 function showAddAccountsResult(result) {
   const { addedAccounts, failures } = result;
   const summary = `成功加入 ${addedAccounts.length} 个，失败 ${failures.length} 个`;
+  if (addedAccounts.length) {
+    sendAnalyticsEvent({
+      type: "import",
+      count: addedAccounts.length,
+      domains: countDomainsFromAccounts(addedAccounts),
+    });
+  }
   if (!addedAccounts.length) {
     const detail = failures.slice(0, 3).map((item) => `${item.reason}: ${item.line}`).join("\n");
     setStatus(`${summary}${detail ? `\n${detail}` : ""}`, "warning");
@@ -845,6 +1071,13 @@ async function fetchAccount(account, options = {}) {
     state.selectedMessageKey = visible[0]?.key || accountMessages[0]?.key || null;
   }
   saveState();
+  sendAnalyticsEvent({
+    type: "fetch_success",
+    domain: domainFromEmail(account.email),
+    source: data.source,
+    scope: state.mailScope,
+    message_count: incomingMessages.length,
+  });
 }
 
 async function refreshAccount(account, options = {}) {
@@ -861,6 +1094,11 @@ async function refreshAccount(account, options = {}) {
     if (!options.silent) {
       setStatusError(error.message);
     }
+    sendAnalyticsEvent({
+      type: "fetch_failed",
+      domain: domainFromEmail(account.email),
+      reason: summary || error.message,
+    });
   } finally {
     saveState();
     render();
@@ -1438,6 +1676,7 @@ document.addEventListener("keydown", (event) => {
     closeCustomSelects();
     closeThemeMenu();
     closeAccountMenus();
+    closeAdminPopover();
   }
   if (event.key === "Escape" && accountModal.classList.contains("open")) {
     closeAccountModal();
@@ -1456,6 +1695,9 @@ document.addEventListener("click", (event) => {
   }
   if (!event.target.closest(".account-card")) {
     closeAccountMenus();
+  }
+  if (!event.target.closest("#admin-entry")) {
+    closeAdminPopover();
   }
 });
 
@@ -1687,10 +1929,28 @@ themeMenu?.addEventListener("click", (event) => {
   setTheme(item.dataset.themeValue);
 });
 
+backgroundOpacityRange?.addEventListener("input", () => {
+  setBackgroundOpacity(backgroundOpacityRange.value);
+});
+
+backgroundOpacityRange?.addEventListener("change", () => {
+  showToast(`背景透明度 ${backgroundOpacityRange.value}%`);
+});
+
+adminEntryButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleAdminPopover();
+});
+
+adminLoginPopover?.addEventListener("submit", loginAdminFromPopover);
+
 customSelects.forEach(buildCustomSelect);
 buildThemeMenu();
 loadHighlightColor();
 loadTheme();
+loadBackgroundOpacity();
 loadSavedState();
 render();
 showInitialCacheNotice();
+startAnalytics();
+openAdminPopoverFromQuery();
