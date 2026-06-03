@@ -40,6 +40,7 @@ const accountForm = document.querySelector("#account-form");
 const accountInput = document.querySelector("#account-input");
 const accountInputCheck = document.querySelector("#account-input-check");
 const accountSearch = document.querySelector("#account-search");
+const accountSearchClear = document.querySelector("#account-search-clear");
 const accountList = document.querySelector("#account-list");
 const accountModal = document.querySelector("#account-modal");
 const confirmModal = document.querySelector("#confirm-modal");
@@ -1712,6 +1713,16 @@ clearAccountsButton.addEventListener("click", () => {
 accountInput.addEventListener("input", renderAccountInputCheck);
 
 accountSearch.addEventListener("input", renderAccounts);
+
+accountSearchClear?.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+});
+
+accountSearchClear?.addEventListener("click", () => {
+  accountSearch.value = "";
+  renderAccounts();
+  accountSearch.focus();
+});
 
 messageSearch?.addEventListener("input", () => {
   state.messageSearch = messageSearch.value;
